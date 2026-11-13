@@ -19,7 +19,7 @@
 :root{--bg:#121316;--card:#1F2124;--card2:#2E3135;--line:#2E3135;--ink:#fff;--muted:#B8BDC4;--mint:#2EE6B0;--onmint:#062B21;--amber:#FFD27A;--amberbg:#2A2410;--red:#FF8A8A;--hero:#12322A}
 *{box-sizing:border-box;-webkit-tap-highlight-color:transparent}
 html,body{margin:0;background:var(--bg);color:var(--ink);font-family:Manrope,system-ui,sans-serif}
-body{padding:calc(env(safe-area-inset-top) + 16px) 16px calc(env(safe-area-inset-bottom) + 96px)}
+body{padding:calc(env(safe-area-inset-top) + 16px) 16px calc(env(safe-area-inset-bottom) + 170px)}
 button{font-family:inherit;cursor:pointer;border:0;color:inherit}
 .app{max-width:520px;margin:0 auto;display:flex;flex-direction:column;gap:12px}
 .k{font-size:12px;color:var(--muted);letter-spacing:.06em;font-weight:700;text-transform:uppercase}
@@ -49,7 +49,9 @@ nav button.on{color:var(--mint);background:#12322A}
 nav svg{width:22px;height:22px}
 .step{display:flex;align-items:center;justify-content:space-between;background:var(--card);border-radius:16px;padding:8px}
 .sbtn{width:52px;height:52px;border-radius:14px;background:var(--card2);font-size:26px;font-weight:800}
-.val{font-size:30px;font-weight:800;text-align:center}
+.val{font-size:30px;font-weight:800;text-align:center;white-space:nowrap}
+.grid2 .val{font-size:24px}
+.grid2 .sbtn{width:42px;height:42px;font-size:22px}
 .unit{font-size:12px;color:var(--muted);text-align:center}
 .grid2{display:grid;grid-template-columns:repeat(2,minmax(0,1fr));gap:10px}
 .chips{display:flex;flex-wrap:wrap;gap:6px}

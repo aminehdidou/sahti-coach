@@ -186,8 +186,15 @@ function listen() {
     es.onerror = () => {};
   } catch (e) {}
 }
+const DEV = LS.get('dev', '') || (() => { const v = Array.from(crypto.getRandomValues(new Uint8Array(6)), b => b.toString(16).padStart(2, '0')).join(''); LS.set('dev', v); return v; })();
+function devState() {
+  const v = S.devs && S.devs.d; if (!v) return 'ok';
+  if ((v.blocked || []).includes(DEV)) return 'blocked';
+  if ((v.trusted || []).length && !(v.trusted || []).includes(DEV)) return 'wait';
+  return 'ok';
+}
 async function send(kind, d) {
-  const env = { k: kind, at: Date.now(), d };
+  const env = { k: kind, at: Date.now(), d, dev: DEV };
   const body = await seal(env);
   const r = await fetch(`${HOST}/${TOPIC}`, { method: 'POST', body });
   if (!r.ok) throw new Error('relais');
@@ -704,6 +711,9 @@ function render() {
   else if (view === 'live') h = vLiveTab();
   else if (view === 'bilan') h = vBilan();
   else h = vSemaine();
+  const ds = devState();
+  if (ds === 'wait') h = `<div class="prop">Cet appareil attend l'autorisation d'Amine : tes changements seront appliqués dès qu'il l'aura accordée.</div>` + h;
+  if (ds === 'blocked') h = `<div class="prop" style="border-color:var(--red);color:var(--red)">Cet appareil a été bloqué par Amine : tes changements ne lui parviennent pas.</div>` + h;
   app.innerHTML = h;
   const l = live();
   document.getElementById('nav').innerHTML = [['semaine', 'Semaine', IC.cal], ['live', 'En cours', IC.dot], ['bilan', 'Bilan', IC.chart]]

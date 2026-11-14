@@ -86,6 +86,17 @@ input,select,textarea{font-family:inherit;font-size:16px;background:var(--card2)
 .empty{text-align:center;color:var(--muted);padding:40px 10px;line-height:1.5}
 .live{display:flex;justify-content:space-between;align-items:flex-end}
 .ghost{background:none;color:var(--mint);font-weight:800;font-size:14px;padding:6px 2px;text-align:left}
+.main.static{position:static;box-shadow:none;margin-top:6px}
+.tg.chg{background:#2A2F55;color:#C9D0FF}
+.tg.warnt{background:#4A2A12;color:#FFD9B0}
+.row.chgd{border-color:#7B86E8}
+.pill.chgp{color:#C9D0FF;background:#2A2F55}
+.wcard{display:flex;flex-direction:column;gap:6px;background:var(--card);border:1px solid var(--line);border-radius:18px;padding:14px;text-align:left;color:#fff;width:100%}
+.wcard.hl{border-color:var(--mint)}
+.wtop{display:flex;justify-content:space-between;align-items:baseline;gap:8px}
+.wday{font-size:18px;font-weight:800}
+nav button.pulse{color:#5BD83A}
+.prop{margin:0}
 </style>
 </head>
 <body>
@@ -137,18 +148,21 @@ async function unseal(s) {
 }
 
 // ---------- État ----------
-let S = LS.get('state', {});          // dernier message de chaque sorte : {at, d}
-let view = LS.get('view', 'seance');  // seance | heures | bilan
-let sub = null;                       // {edit:{bi,ii}} | {editC:bi} | {pick:{mode,bi,ii}} | {move:slot}
-let D = null;                         // séance en cours de préparation {date, base, session, dirty}
+let S = LS.get('state', {});          // dernier message de chaque sorte : {at, d} ; « day:AAAA-MM-JJ » et « cp:AAAA-MM-JJ » par jour
+let view = LS.get('view2', 'semaine'); // semaine | live | bilan
+let sub = null;                       // {day} | {edit:{bi,ii}} | {editC:bi} | {editI:bi} | {circ:bi} | {pick:{…}} | {move:date}
+let D = null;                         // séance ouverte {date, base, orig, session, dirty}
 let group = null;
 let online = true;
 
 function ingest(env) {
   if (!env || !env.k) return;
-  const cur = S[env.k];
-  if (cur && cur.at > env.at) return;
-  S[env.k] = { at: env.at, d: env.d };
+  const put = (k, v) => { const cur = S[k]; if (!cur || cur.at <= v.at) S[k] = v; };
+  put(env.k, { at: env.at, d: env.d });
+  if (env.k === 'cplan' && env.d && env.d.date) put('cp:' + env.d.date, { at: env.at, d: env.d });
+  if (env.k === 'plan' && env.d && env.d.date) put('day:' + env.d.date, { at: env.at, d: env.d });
+  // ménage : jours passés
+  Object.keys(S).forEach(k => { if (/^(day|cp):/.test(k) && k.slice(k.indexOf(':') + 1) < today()) delete S[k]; });
   LS.set('state', S);
 }
 async function poll() {
@@ -167,59 +181,113 @@ function listen() {
   try {
     const es = new EventSource(`${HOST}/${TOPIC}/sse`);
     es.onmessage = async e => {
-      try { const m = JSON.parse(e.data); if (m.event === 'message') { ingest(await unseal(m.message)); online = true; render(); } } catch (x) {}
+      try { const m = JSON.parse(e.data); if (m.event === 'message') { ingest(await unseal(m.message)); online = true; if (!(D && D.dirty)) render(); } } catch (x) {}
     };
-    es.onerror = () => { online = false; };
+    es.onerror = () => {};
   } catch (e) {}
 }
 async function send(kind, d) {
   const env = { k: kind, at: Date.now(), d };
-  ingest(env);
   const body = await seal(env);
   const r = await fetch(`${HOST}/${TOPIC}`, { method: 'POST', body });
   if (!r.ok) throw new Error('relais');
+  ingest(env);
 }
 
 // ---------- Lecture des données ----------
 const lib = () => (S.lib && S.lib.d) || [];
 const libMap = () => Object.fromEntries(lib().map(e => [e.id, e]));
 const name = id => (libMap()[id] && libMap()[id].name) || String(id).replace('perso:', '');
-const proposal = () => S.plan && S.plan.d;
+const prop = date => (S['day:' + date] || {}).d || null;
+const coachPlan = date => (S['cp:' + date] || {}).d || null;
 function live() {
   const l = S.live && S.live.d;
   if (!l || l.finished || l.date !== today() || Date.now() - S.live.at > 3 * 3600e3) return null;
   return l;
 }
-function coachFor(date) { const c = S.cplan && S.cplan.d; return c && c.date === date ? c : null; }
-function base() {
+function slots() {
+  const m = {};
+  [((S.sched || {}).d || {}).slots || [], ((S.csched || {}).d || {}).slots || []].forEach(list => list.forEach(s => { if (!m[s.date] || (s.at || 0) >= (m[s.date].at || 0)) m[s.date] = Object.assign({}, s); }));
+  return Object.values(m).filter(s => s.date >= today()).sort((a, b) => a.date < b.date ? -1 : 1);
+}
+const slotOf = date => slots().find(s => s.date === date) || null;
+const timeOk = s => !!s && s.status === 'ok' && (s.at || 0) > 0;
+/** Jours de séance des 8 prochains jours. */
+function days() {
+  const set = new Set(slots().filter(s => s.status !== 'off').map(s => s.date));
+  Object.keys(S).forEach(k => { if (k.startsWith('day:')) set.add(k.slice(4)); });
+  return [...set].filter(d => d >= today() && (slotOf(d) || {}).status !== 'off').sort();
+}
+/** Base d'un jour : version de Hamza si plus récente que la proposition de Sahti. */
+function baseOf(date) {
   const l = live();
-  if (l && l.plan) return { date: l.date, session: l.plan, at: S.live.at, src: 'live' };
-  const p = proposal();
-  const c = p ? coachFor(p.date) : (S.cplan && S.cplan.d);
-  if (c && (!p || S.cplan.at >= S.plan.at || c.date === p.date)) return { date: c.date, session: c.session, at: S.cplan.at, src: 'coach' };
-  if (p) return { date: p.date, session: p.session, at: S.plan.at, src: 'sahti' };
+  if (l && l.plan && l.date === date) return { session: l.plan, at: S.live.at, src: 'live', orig: (prop(date) || {}).session || l.plan };
+  const p = S['day:' + date], c = S['cp:' + date];
+  if (c && (!p || c.at >= p.at - 60000)) return { session: c.d.session, at: c.at, src: 'coach', orig: p ? p.d.session : c.d.session };
+  if (p) return { session: p.d.session, at: p.at, src: 'sahti', orig: p.d.session };
   return null;
 }
-function ensureDraft() {
-  const b = base();
-  if (!b) { D = null; return; }
-  if (!D || (!D.dirty && (D.at !== b.at || D.src !== b.src)) || D.date !== b.date && !D.dirty) D = { date: b.date, session: clone(b.session), at: b.at, src: b.src, dirty: false };
+function open(date) {
+  const b = baseOf(date); if (!b) { D = null; return; }
+  if (!D || D.date !== date || (!D.dirty && D.at !== b.at)) D = { date, session: clone(b.session), orig: b.orig, at: b.at, src: b.src, dirty: false };
 }
 const isStrength = b => b.kind === 'strength' || b.kind === 'activation';
 const doneSets = ex => ((live() || {}).sets || []).filter(s => s.ex === ex && s.done);
+const validated = date => { const b = baseOf(date); return !!b && b.src !== 'sahti'; };
+
+// ---------- Différences avec la proposition de Sahti ----------
+function origItems(sess) { const m = {}; (sess.blocks || []).forEach(b => (b.items || []).forEach(i => { m[i.ex] = i; })); return m; }
+function itemBadge(i) {
+  if (!D || !D.orig) return '';
+  const o = origItems(D.orig)[i.ex];
+  if (!o) return '<span class="tg chg">ajouté</span>';
+  const a = itemLine(o), b = itemLine(i);
+  return a !== b ? `<span class="tg chg">modifié · avant ${esc(a)}</span>` : '';
+}
+function changes() {
+  if (!D || !D.orig) return 0;
+  const o = origItems(D.orig), n = origItems(D.session);
+  let c = 0;
+  Object.keys(n).forEach(k => { if (!o[k] || itemLine(o[k]) !== itemLine(n[k])) c++; });
+  Object.keys(o).forEach(k => { if (!n[k]) c++; });
+  const cs = s => (s.blocks || []).filter(b => !isStrength(b) && b.kind !== 'circuit').map(b => b.kind + b.title + b.minutes + JSON.stringify(b.cardio || '') + JSON.stringify(b.circuit || '')).join('|');
+  if (cs(D.orig) !== cs(D.session)) c++;
+  return c;
+}
+
+// ---------- Durée réaliste ----------
+function blockMin(b) {
+  if (b.cardio) return b.cardio.minutes;
+  if (b.kind === 'circuit' && b.circuit) {
+    const c = b.circuit, n = b.items.length;
+    const work = b.items.reduce((a, i) => a + (i.seconds > 0 ? i.seconds : i.repMax <= 1 ? c.workSec : i.repMax * 3), 0);
+    return Math.max(1, Math.round((c.rounds * (work + Math.max(0, n - 1) * c.restSec) + Math.max(0, c.rounds - 1) * c.roundRestSec) / 60));
+  }
+  if (isStrength(b)) return Math.max(3, Math.round(b.items.reduce((a, i) => a + i.sets * ((i.seconds > 0 ? i.seconds : i.repMax * 3) + (i.restSec || 90)), 0) / 60));
+  return b.minutes || 0;
+}
+const sessMin = s => (s.blocks || []).reduce((a, b) => a + blockMin(b), 0);
 
 // ---------- Actions ----------
 function toast(t) { const e = document.getElementById('toast'); e.textContent = t; e.style.display = 'block'; clearTimeout(toast.h); toast.h = setTimeout(() => e.style.display = 'none', 2600); }
-function dirty() { D.dirty = true; recompute(); render(); }
-function recompute() { D.session.blocks.forEach(b => { if (isStrength(b)) b.minutes = Math.max(4, b.items.reduce((a, i) => a + i.sets * 3, 0)); if (b.cardio) b.minutes = b.cardio.minutes; }); }
+function dirty() { D.dirty = true; D.session.blocks.forEach(b => b.minutes = blockMin(b)); render(); }
 function item(bi, ii) { return D.session.blocks[bi].items[ii]; }
+const top0 = () => scrollTo(0, 0);
 
 const A = {
-  tab(v) { view = v; sub = null; LS.set('view', v); render(); scrollTo(0, 0); },
-  back() { sub = sub && sub.pick && sub.pick.from ? sub.pick.from : null; group = null; render(); scrollTo(0, 0); },
-  edit(bi, ii) { sub = { edit: { bi, ii } }; render(); scrollTo(0, 0); },
-  editC(bi) { sub = { editC: bi }; render(); scrollTo(0, 0); },
-  pick(mode, bi, ii) { sub = { pick: { mode, bi, ii, from: sub } }; group = null; render(); scrollTo(0, 0); },
+  tab(v) { view = v; sub = null; LS.set('view2', v); render(); top0(); },
+  day(date) { sub = { day: date }; open(date); render(); top0(); },
+  back() {
+    if (sub && sub.pick && sub.pick.from) sub = sub.pick.from;
+    else if (sub && (sub.edit || sub.editC != null || sub.editI != null || sub.circ != null || sub.move)) sub = sub.parent || (D ? { day: D.date } : null);
+    else sub = null;
+    group = null; render(); top0();
+  },
+  edit(bi, ii) { sub = { edit: { bi, ii }, parent: sub }; render(); top0(); },
+  editC(bi) { sub = { editC: bi, parent: sub }; render(); top0(); },
+  editI(bi) { sub = { editI: bi, parent: sub }; render(); top0(); },
+  circ(bi) { sub = { circ: bi, parent: sub && sub.circ != null ? sub.parent : sub }; render(); top0(); },
+  pick(mode, bi, ii) { sub = { pick: { mode, bi, ii, from: sub } }; group = null; render(); top0(); },
   step(bi, ii, f, d) {
     const it = item(bi, ii);
     if (f === 'sets') it.sets = Math.max(Math.max(1, doneSets(it.ex).length), it.sets + d);
@@ -228,6 +296,7 @@ const A = {
     if (f === 'kg') it.kg = Math.max(0, Math.round(((it.kg || 0) + d) * 10) / 10);
     dirty();
   },
+  cmode(bi, ii, m) { const it = item(bi, ii); if (m === 'time') { it.repMin = it.repMax = 1; it.seconds = D.session.blocks[bi].circuit.workSec; } else { it.seconds = 0; it.repMin = it.repMax = 12; } dirty(); },
   stepC(bi, f, d) {
     const c = D.session.blocks[bi].cardio;
     if (f === 'min') c.minutes = Math.max(1, c.minutes + d);
@@ -235,6 +304,27 @@ const A = {
     if (f === 'spd') c.speed = Math.max(0.5, Math.round(((c.speed || 3) + d) * 10) / 10);
     if (f === 'lvl') c.level = Math.max(1, (c.level || 5) + d);
     dirty();
+  },
+  machine(bi, m) {
+    const b = D.session.blocks[bi];
+    if (b.cardio) { b.cardio.machine = m; b.title = m; if (!/tapis/i.test(m)) { b.cardio.speed = null; b.cardio.incline = null; b.cardio.level = b.cardio.level || 5; } }
+    else b.title = (b.kind === 'warmup' ? 'Échauffement · ' : '') + m;
+    dirty();
+  },
+  stepI(bi, d) { const b = D.session.blocks[bi]; b.minutes = Math.max(1, (b.minutes || 5) + d); D.dirty = true; render(); },
+  stepK(bi, f, d) {
+    const c = D.session.blocks[bi].circuit;
+    if (f === 'rounds') c.rounds = Math.max(1, c.rounds + d);
+    if (f === 'work') c.workSec = Math.max(10, c.workSec + d);
+    if (f === 'rest') c.restSec = Math.max(0, c.restSec + d);
+    if (f === 'rrest') c.roundRestSec = Math.max(0, c.roundRestSec + d);
+    dirty();
+  },
+  addCircuit() {
+    const blk = { kind: 'circuit', title: 'Circuit', minutes: 0, detail: '', items: [], cardio: null, circuit: { rounds: 3, workSec: 40, restSec: 30, roundRestSec: 60 } };
+    const at = D.session.blocks.findIndex(b => b.kind === 'cardio' || b.kind === 'cooldown');
+    const bi = at < 0 ? D.session.blocks.length : at;
+    D.session.blocks.splice(bi, 0, blk); dirty(); A.circ(bi);
   },
   tip(bi, ii, t) {
     const it = item(bi, ii);
@@ -246,12 +336,20 @@ const A = {
   remove(bi, ii) {
     const it = item(bi, ii);
     if (doneSets(it.ex).length) { toast('Déjà commencé : réduis plutôt les séries'); return; }
-    D.session.blocks[bi].items.splice(ii, 1); sub = null; dirty();
+    D.session.blocks[bi].items.splice(ii, 1);
+    if (!D.session.blocks[bi].items.length && D.session.blocks[bi].kind === 'circuit') D.session.blocks.splice(bi, 1);
+    A.back(); dirty();
   },
-  removeC(bi) { D.session.blocks.splice(bi, 1); sub = null; dirty(); },
+  removeC(bi) { D.session.blocks.splice(bi, 1); sub = { day: D.date }; dirty(); },
+  slam(bi, ii) { Object.assign(item(bi, ii), { ex: 'perso:Lancer contre le mur', kg: 3 }); dirty(); },
   choose(id) {
     const p = sub.pick; const e = libMap()[id];
     if (e && e.risk && !confirm(name(id) + ' charge le bas du dos d\'Amine. Le garder quand même ?')) return;
+    if (p.mode === 'addc') {
+      const b = D.session.blocks[p.bi];
+      b.items.push({ ex: id, sets: 1, repMin: 1, repMax: 1, restSec: 0, seconds: 0, kg: null, note: '' });
+      sub = p.from; group = null; dirty(); top0(); return;
+    }
     if (e && e.group === 'Cardio' || (!e && p.cardio)) {
       const blk = { kind: 'cardio', title: name(id), minutes: 10, detail: '', items: [], cardio: { machine: name(id), minutes: 10, effort: 'Selon le coach' } };
       const at = D.session.blocks.findIndex(b => b.kind === 'cooldown');
@@ -262,51 +360,57 @@ const A = {
       else Object.assign(it, { ex: id, kg: null, note: '' });
     } else {
       const ni = { ex: id, sets: 3, repMin: 10, repMax: 12, restSec: 90, seconds: 0, kg: null, note: '' };
-      if (p.bi != null && p.ii != null) D.session.blocks[p.bi].items.splice(p.ii + 1, 0, ni);
-      else {
-        let bi = -1; D.session.blocks.forEach((b, i) => { if (isStrength(b)) bi = i; });
-        if (bi < 0) { const at = D.session.blocks.findIndex(b => b.kind === 'cardio' || b.kind === 'cooldown'); bi = at < 0 ? D.session.blocks.length : at; D.session.blocks.splice(bi, 0, { kind: 'strength', title: 'Programme du coach', minutes: 9, detail: '', items: [], cardio: null }); }
-        D.session.blocks[bi].items.push(ni);
-      }
+      let bi = -1; D.session.blocks.forEach((b, i) => { if (b.kind === 'strength') bi = i; });
+      if (bi < 0) { const at = D.session.blocks.findIndex(b => b.kind === 'cardio' || b.kind === 'cooldown' || b.kind === 'circuit'); bi = at < 0 ? D.session.blocks.length : at; D.session.blocks.splice(bi, 0, { kind: 'strength', title: 'Programme du coach', minutes: 9, detail: '', items: [], cardio: null }); }
+      D.session.blocks[bi].items.push(ni);
     }
-    sub = null; group = null; dirty(); scrollTo(0, 0);
+    sub = p.from && p.from.day ? p.from : { day: D.date }; group = null; dirty(); top0();
   },
   other() { const t = prompt('Nom de l\'exercice :'); if (t && t.trim()) A.choose('perso:' + t.trim().charAt(0).toUpperCase() + t.trim().slice(1)); },
   group(g) { group = g; render(); },
   async validate() {
     if (!D) return;
     const btn = document.querySelector('.main'); if (btn) { btn.textContent = 'Envoi…'; btn.classList.add('off'); }
+    const s = slotOf(D.date);
     try {
+      if (s && !timeOk(s) && !live()) await A.slotSend(D.date, { status: 'ok', by: 'hamza' }, true);
       await send('cplan', { date: D.date, session: D.session, by: 'coach' });
-      D.dirty = false; D.at = S.cplan.at; D.src = live() ? 'live' : 'coach';
-      toast(live() ? 'Changement envoyé à la montre ✓' : 'Séance validée : elle arrive sur la montre d\'Amine ✓');
+      D.dirty = false; D.at = S['cp:' + D.date].at; D.src = live() ? 'live' : 'coach';
+      toast(live() ? 'Changement envoyé à la montre ✓' : 'Séance validée ✓ Amine est prévenu');
     } catch (e) { toast('Pas de réseau : envoi par WhatsApp'); A.whatsapp(); }
+    render();
+  },
+  async validateWeek() {
+    const list = days().filter(d => !validated(d));
+    if (!list.length) { toast('Tout est déjà validé ✓'); return; }
+    if (!confirm(`Valider ${list.length} séance(s) telles que Sahti les propose, avec leurs heures ?`)) return;
+    try {
+      const all = slots(); const now = Date.now();
+      await send('csched', { slots: all.map(x => list.includes(x.date) && x.status !== 'off' ? Object.assign({}, x, { status: 'ok', by: 'hamza', at: now }) : x) });
+      for (const d of list) { const b = baseOf(d); if (b) await send('cplan', { date: d, session: b.session, by: 'coach' }); }
+      toast('Semaine validée ✓ Amine est prévenu');
+    } catch (e) { toast('Pas de réseau, réessaie'); }
     render();
   },
   whatsapp() {
     const e = [], c = [];
     D.session.blocks.forEach(b => {
-      if (isStrength(b)) b.items.forEach(i => e.push([i.ex, i.sets, i.repMin, i.repMax, i.kg ?? '', i.ex.startsWith('perso:') ? i.ex.slice(6) : '']));
+      if (isStrength(b) || b.kind === 'circuit') b.items.forEach(i => e.push([i.ex, i.sets, i.repMin, i.repMax, i.kg ?? '', i.ex.startsWith('perso:') ? i.ex.slice(6) : '']));
       if (b.cardio) c.push([b.cardio.machine, b.cardio.minutes, b.cardio.incline ?? '', b.cardio.speed ?? '']);
     });
     const code = b64e(new TextEncoder().encode(JSON.stringify({ d: D.date, e, c, n: '' })));
     location.href = 'https://wa.me/?text=' + encodeURIComponent('Séance validée pour Amine\n#sahti1 ' + code);
   },
   // Heures
-  async slot(date, patch) {
+  async slotSend(date, patch, quiet) {
     const all = slots();
     const s = all.find(x => x.date === date) || { date, time: '17:30', status: 'ok', by: 'hamza' };
     Object.assign(s, patch, { at: Date.now() });
-    try { await send('csched', { slots: all.map(x => x.date === date ? s : x).concat(all.some(x => x.date === date) ? [] : [s]) }); toast('Envoyé à Amine ✓'); }
-    catch (e) { toast('Pas de réseau, réessaie'); }
-    sub = null; render();
+    await send('csched', { slots: all.map(x => x.date === date ? s : x).concat(all.some(x => x.date === date) ? [] : [s]) });
+    if (!quiet) toast('Envoyé à Amine ✓');
   },
-  shift(date, min) {
-    const s = slots().find(x => x.date === date); if (!s) return;
-    const [h, m] = s.time.split(':').map(Number); const t = h * 60 + m + min;
-    A.slot(date, { time: String(Math.floor(t / 60) % 24).padStart(2, '0') + ':' + String(t % 60).padStart(2, '0'), status: 'prop', by: 'hamza' });
-  },
-  move(date) { sub = { move: date }; render(); },
+  async slot(date, patch) { try { await A.slotSend(date, patch); } catch (e) { toast('Pas de réseau, réessaie'); } if (sub && sub.move) sub = sub.parent || null; render(); },
+  move(date) { sub = { move: date, parent: sub }; render(); top0(); },
   moveSave(date) {
     const nd = document.getElementById('md').value, nt = document.getElementById('mt').value;
     if (!nt) return;
@@ -322,73 +426,130 @@ const A = {
   },
 };
 
-function slots() {
-  const m = {};
-  [((S.sched || {}).d || {}).slots || [], ((S.csched || {}).d || {}).slots || []].forEach(list => list.forEach(s => { if (!m[s.date] || (s.at || 0) >= (m[s.date].at || 0)) m[s.date] = Object.assign({}, s); }));
-  return Object.values(m).filter(s => s.date >= today()).sort((a, b) => a.date < b.date ? -1 : 1);
-}
-
 // ---------- Rendu ----------
 const photo = (id, cls = 'ph') => `<img class="${cls}" src="img/${encodeURIComponent(id)}.jpg" alt="" loading="lazy" onerror="this.outerHTML='<div class=&quot;${cls === 'ph' ? 'ph' : 'noimg'}&quot;>${esc(name(id).charAt(0))}</div>'">`;
 function reps(i) { return i.seconds > 0 && i.repMax <= 1 ? `${i.seconds} s` : (i.repMin === i.repMax ? i.repMax : `${i.repMin}-${i.repMax}`); }
 function itemLine(i) { return `${i.sets} × ${reps(i)}` + (i.kg != null ? ` · ${num(i.kg)} kg` : ''); }
 function cardioLine(c) { return [c.minutes + ' min', c.incline != null && c.incline !== '' ? num(c.incline) + ' %' : null, c.speed ? num(c.speed) + ' km/h' : null, c.level ? 'niveau ' + c.level : null].filter(Boolean).join(' · '); }
 const IC = {
-  run: '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" aria-hidden="true"><circle cx="6" cy="17" r="3"/><circle cx="18" cy="17" r="3"/><path d="M9 17h6M12 6l3 11"/></svg>',
+  tread: '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" aria-hidden="true"><path d="M3 19l17-5M17 14l1-9h2"/><circle cx="10" cy="6" r="1.5"/><path d="M10 8l-1 4 2 2"/></svg>',
+  bike: '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" aria-hidden="true"><circle cx="6" cy="17" r="3"/><circle cx="18" cy="17" r="3"/><path d="M9 17h6M12 6l3 11"/></svg>',
+  ellip: '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" aria-hidden="true"><circle cx="12" cy="5" r="2"/><path d="M7 21l3-7 2-4 3 3 3 1M5 12l5-2"/></svg>',
+  stairs: '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" aria-hidden="true"><path d="M3 20h5v-5h5v-5h5V5h3"/></svg>',
+  mob: '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" aria-hidden="true"><circle cx="12" cy="4" r="2"/><path d="M12 6v7M6 9l6 2 6-2M9 21l3-8 3 8"/></svg>',
+  circ: '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" aria-hidden="true"><path d="M20 12a8 8 0 1 1-3-6.2M20 4v5h-5"/></svg>',
   cal: '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" aria-hidden="true"><rect x="3" y="5" width="18" height="16" rx="3"/><path d="M8 3v4M16 3v4M3 10h18"/></svg>',
   chart: '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" aria-hidden="true"><path d="M4 20V10M10 20V4M16 20v-7M22 20H2"/></svg>',
-  dumb: '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" aria-hidden="true"><path d="M6 6v12M18 6v12M3 9v6M21 9v6M6 12h12"/></svg>',
+  dot: '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" aria-hidden="true"><circle cx="12" cy="12" r="4" fill="currentColor"/><circle cx="12" cy="12" r="9"/></svg>',
 };
+const machIcon = t => /tapis/i.test(t) ? IC.tread : /v[ée]lo|bike|pikala/i.test(t) ? IC.bike : /escalier|stair|grimp/i.test(t) ? IC.stairs : IC.ellip;
+const MACHINES = ['Tapis', 'Elliptique', 'Vélo', 'Grimpeur d\'escalier', 'Rameur'];
+const slamRisk = i => /slam/i.test(i.ex + name(i.ex));
 
 function rowItem(bi, ii, i, editable) {
   const e = libMap()[i.ex] || {};
   const done = doneSets(i.ex);
-  const replaced = D.dirty || D.src !== 'sahti' ? '' : '';
-  return `<div class="row ${done.length >= i.sets && live() ? 'done' : ''}">${photo(i.ex)}
-    <div class="grow"><div class="nm">${e.risk ? '⚠ ' : ''}${esc(name(i.ex))}</div><div class="sb">${itemLine(i)}</div>
+  const badge = itemBadge(i);
+  return `<div class="row ${done.length >= i.sets && live() ? 'done' : ''} ${badge ? 'chgd' : ''}">${photo(i.ex)}
+    <div class="grow"><div class="nm">${e.risk || slamRisk(i) ? '⚠ ' : ''}${esc(name(i.ex))}</div><div class="sb">${itemLine(i)}</div>
     ${e.last ? `<div class="sb">Dernière fois : ${esc(e.last)}</div>` : ''}
-    ${i.note ? `<span class="tg n">${esc(i.note)}</span>` : ''}${replaced}</div>
+    ${i.note ? `<span class="tg n">${esc(i.note)}</span> ` : ''}${badge}</div>
     ${editable ? `<button class="btn2" onclick="A.edit(${bi},${ii})">Modifier</button>` : ''}</div>`;
 }
 function rowCardio(bi, b, editable) {
-  return `<div class="row"><div class="ph">${IC.run}</div><div class="grow"><div class="nm">${esc(b.title)}</div><div class="sb">${cardioLine(b.cardio)}</div></div>
+  return `<div class="row"><div class="ph">${machIcon(b.title + ' ' + b.cardio.machine)}</div><div class="grow"><div class="nm">${esc(b.title)}</div><div class="sb">${cardioLine(b.cardio)}</div><div class="sb">+ récupération de la machine</div></div>
     ${editable ? `<button class="btn2" onclick="A.editC(${bi})">Modifier</button>` : ''}</div>`;
 }
+function rowInfo(bi, b) {
+  return `<div class="row"><div class="ph">${b.kind === 'warmup' ? machIcon(b.title) : IC.mob}</div><div class="grow"><div class="nm">${esc(b.title)}</div><div class="sb">${b.minutes} min${b.detail ? ' · ' + esc(b.detail.slice(0, 70)) + (b.detail.length > 70 ? '…' : '') : ''}</div></div>
+    <button class="btn2" onclick="A.editI(${bi})">Modifier</button></div>`;
+}
+function rowCircuit(bi, b) {
+  const c = b.circuit;
+  return `<div class="row" style="border-color:var(--mint)"><div class="ph">${IC.circ}</div><div class="grow"><div class="nm">${esc(b.title)} · ${c.rounds} tours</div>
+    <div class="sb">${b.items.length} exercices · travail ${c.workSec} s · repos ${c.restSec} s / ${c.roundRestSec} s · ≈ ${blockMin(b)} min</div>
+    ${b.items.some(slamRisk) ? '<span class="tg warnt">dos : à adapter</span>' : ''}</div>
+    <button class="btn2" onclick="A.circ(${bi})">Modifier</button></div>`;
+}
+const KIND_T = { warmup: 'Échauffement', mobility: 'Mobilité', activation: 'Activation', strength: 'Renforcement', circuit: 'Circuit', cardio: 'Cardio' };
 
-function vSeance() {
-  ensureDraft();
-  if (!D) return `<div class="empty">En attente de la séance proposée par Sahti…<br>Elle apparaît dès qu'Amine ouvre Sahti sur son téléphone.</div>`;
-  const p = proposal();
-  const l = live();
-  if (l) return vLive(l);
-  const validated = !D.dirty && D.src === 'coach';
-  const s = D.session;
-  let h = `<div class="top"><div><div class="k">Sahti · coach</div><h1>Séance d'Amine</h1></div>
-    <div class="right">${dayLabel(D.date, true)}${p && p.date === D.date && p.form ? '<br>Forme : ' + esc(p.form.toLowerCase()) : ''}</div></div>
-    <div class="box">${esc(s.name)} · ≈ ${s.blocks.reduce((a, b) => a + (b.minutes || 0), 0)} min${p && p.why && p.date === D.date ? ' · ' + esc(p.why) : ''}<br>
-    <span class="warn">À éviter : charge sur le bas du dos (hack squat, T-bar sans appui, extensions).</span></div>
-    <div>${validated ? '<span class="pill ok">validée ✓</span>' : D.dirty ? '<span class="pill wait">modifiée · à envoyer</span>' : '<span class="pill wait">à valider</span>'}</div>`;
-  s.blocks.forEach((b, bi) => {
-    if (isStrength(b)) b.items.forEach((i, ii) => h += rowItem(bi, ii, i, true));
-    else if (b.cardio) h += rowCardio(bi, b, true);
-    else h += `<div class="mini">${esc(b.title)} · ${b.minutes} min</div>`;
+function statusPill(date) {
+  const s = slotOf(date), v = validated(date), t = timeOk(s);
+  if (v && t) return '<span class="pill ok">validée</span>';
+  if (t) return '<span class="pill chgp">heure ✓ · séance à valider</span>';
+  if (v) return '<span class="pill chgp">séance ✓ · heure à confirmer</span>';
+  return '<span class="pill wait">heure et séance à valider</span>';
+}
+
+function vSemaine() {
+  const ds = days();
+  let h = `<div class="top"><div><div class="k">Sahti · coach</div><h1>Semaine d'Amine</h1></div><div class="right">${online ? '' : 'hors ligne'}</div></div>`;
+  if (!ds.length) return h + `<div class="empty">En attente des séances de Sahti…<br>Elles apparaissent dès qu'Amine ouvre Sahti sur son téléphone.</div>`;
+  h += `<button class="q" style="background:var(--mint);color:var(--onmint)" onclick="A.validateWeek()">✓ Valider toute la semaine</button>
+    <div class="mini">Pour chaque séance : confirme l'heure tout de suite, valide le contenu plus tard (ou les deux d'un coup). Touche une séance pour la modifier.</div>`;
+  ds.forEach(d => {
+    const b = baseOf(d), s = slotOf(d);
+    const sess = b ? b.session : null;
+    h += `<button class="wcard ${d === today() ? 'hl' : ''}" onclick="A.day('${d}')">
+      <div class="wtop"><span class="wday">${dayLabel(d, true)}${s ? ' · ' + hour(s.time) : ''}</span>${statusPill(d)}</div>
+      <div class="sb" style="font-size:14px;color:#C9CDD3">${sess ? esc(sess.name) + ' · ≈ ' + sessMin(sess) + ' min' : 'séance en préparation'}</div>
+      ${s && s.status === 'prop' ? `<div class="sb" style="color:var(--amber)">${s.by === 'amine' ? 'Amine propose ' + hour(s.time) + (s.note ? ' · ' + esc(s.note) : '') : 'Ta proposition attend Amine'}</div>` : ''}
+      ${d === today() && prop(d) && prop(d).form ? `<div class="sb">Forme du jour : ${esc(prop(d).form.toLowerCase())}</div>` : d !== today() ? '<div class="sb">Forme du jour : connue le matin même</div>' : ''}
+    </button>`;
   });
-  h += `<button class="add" onclick="A.pick('add')">+ Ajouter un exercice</button>`;
-  h += `<button class="main ${validated ? 'off' : ''}" onclick="A.validate()">${validated ? '✓ Validée · renvoyer' : D.dirty ? '✓ Valider avec mes changements' : '✓ Valider la séance'}</button>`;
-  h += `<div class="small">Arrive sur la montre d'Amine en quelques secondes · chiffré${online ? '' : ' · hors ligne'}</div>`;
+  return h;
+}
+
+function vDay(date) {
+  open(date);
+  const s = slotOf(date);
+  const l = live();
+  if (l && l.date === date) return vLive(l);
+  let h = `<div style="display:flex;align-items:center;gap:10px"><button class="chip" onclick="A.tab('semaine')">‹ Semaine</button><div class="k">Séance d'Amine</div></div>`;
+  h += `<div class="slot"><div class="k">Rendez-vous</div>
+    <div style="display:flex;justify-content:space-between;align-items:baseline;gap:8px"><div style="font-size:24px;font-weight:800;line-height:1.15">${dayLabel(date, true)}<br>${s ? hour(s.time) : '—'}</div>
+    ${timeOk(s) ? '<span class="pill ok">heure confirmée ✓</span>' : s && s.status === 'prop' && s.by === 'hamza' ? '<span class="pill wait">attend Amine</span>' : '<span class="pill wait">heure à confirmer</span>'}</div>
+    ${s && s.status === 'prop' && s.by === 'amine' ? `<div class="prop" style="margin:0"><b>Amine propose ${hour(s.time)}</b>${s.prev ? ' (au lieu de ' + (s.prev.includes('-') ? dayLabel(s.prev).toLowerCase() : hour(s.prev)) + ')' : ''}${s.note ? ' · ' + esc(s.note) : ''}</div>` : ''}
+    <div class="grid2">${timeOk(s) ? `<button class="q" style="background:transparent;border:1px solid var(--mint);color:var(--mint)" disabled>✓ Heure confirmée</button>` : `<button class="q" style="background:var(--mint);color:var(--onmint)" onclick="A.slot('${date}',{status:'ok',by:'hamza'})">✓ Confirmer l'heure</button>`}
+    <button class="q" onclick="A.move('${date}')">Autre heure</button></div>`;
+  if (D) {
+    const p = prop(date);
+    h += `<div style="height:1px;background:var(--line)"></div><div style="font-size:16px;font-weight:800">${esc(D.session.name)}</div>
+      <div class="sb" style="font-size:13px">≈ ${sessMin(D.session)} min${p && p.why ? ' · ' + esc(p.why) : ''}</div>
+      ${date === today() && p && p.form ? `<div class="sb" style="font-size:13px">Forme du jour : ${esc(p.form.toLowerCase())}</div>` : `<div class="mini" style="background:#17191C;border-radius:12px;padding:8px 10px">Forme du jour : affichée le matin même (sommeil, cœur au repos, dos). Si elle est mauvaise, tu es prévenu pour alléger.</div>`}
+      <span class="warn" style="font-size:13px">À éviter : charge sur le bas du dos (hack squat, T-bar sans appui, extensions, slam).</span>`;
+  }
+  h += `</div>`;
+  if (!D) return h + `<div class="empty">Séance en préparation par Sahti…</div>`;
+  let n = 0, lastKind = '';
+  D.session.blocks.forEach((b, bi) => {
+    if (b.kind === 'cooldown' && D.session.blocks.some(x => x.cardio)) return; // récupération de la machine
+    const k = isStrength(b) ? 'strength' : b.cardio ? 'cardio' : b.kind;
+    if (k !== lastKind) { n++; h += `<div class="k" style="margin-top:6px">${n} · ${KIND_T[b.kind] || KIND_T[k] || esc(b.title)}</div>`; lastKind = k; }
+    if (b.kind === 'circuit') h += rowCircuit(bi, b);
+    else if (isStrength(b)) b.items.forEach((i, ii) => h += rowItem(bi, ii, i, true));
+    else if (b.cardio) h += rowCardio(bi, b, true);
+    else h += rowInfo(bi, b);
+  });
+  h += `<div class="grid2"><button class="add" onclick="A.pick('add')">+ Exercice</button><button class="add" style="border-color:var(--mint);color:var(--mint)" onclick="A.addCircuit()">+ Circuit</button></div>`;
+  const c = changes(), v = validated(date) && !D.dirty, t = timeOk(s);
+  const label = v ? '✓ Validée · renvoyer' : (t ? '✓ Valider la séance' : '✓ Valider l\'heure et la séance') + (c ? ` (${c} changement${c > 1 ? 's' : ''})` : '');
+  h += `<button class="main ${v ? 'off' : ''}" onclick="A.validate()">${label}</button>`;
+  h += `<div class="small">${t && !v ? 'L\'heure est déjà confirmée : il ne reste que la séance.<br>' : ''}Modifie autant d'exercices que tu veux, puis valide une seule fois.<br>Amine reçoit une notification ; la montre se met à jour dès qu'elle est connectée (en séance : moins d'une minute).</div>`;
   return h;
 }
 
 function vLive(l) {
   const min = Math.max(0, Math.round((Date.now() - l.start) / 60000));
+  open(l.date);
   const s = D.session;
   let fait = '', ensuite = '';
   s.blocks.forEach((b, bi) => {
-    if (isStrength(b)) b.items.forEach((i, ii) => {
+    if (isStrength(b) || b.kind === 'circuit') b.items.forEach((i, ii) => {
       const d = doneSets(i.ex);
       if (d.length) fait += `<div class="row done"><div style="color:var(--mint);font-weight:800">✓</div><div class="grow"><div class="nm">${esc(name(i.ex))}</div>
-        <div class="sb">${d.map(x => (x.kg != null ? num(x.kg) + ' × ' : '') + x.reps).join(' · ')}${d.some(x => x.rir != null) ? ' — RIR ' + d.map(x => x.rir ?? '–').join(', ') : ''}</div></div></div>`;
-      if (d.length < i.sets) ensuite += rowItem(bi, ii, i, true);
+        <div class="sb">${d.map(x => (x.kg != null ? num(x.kg) + ' × ' : '') + (x.seconds ? x.seconds + ' s' : x.reps)).join(' · ')}${d.some(x => x.rir != null) ? ' — réserve ' + d.map(x => x.rir ?? '–').join(', ') : ''}</div></div></div>`;
+      if (d.length < i.sets && b.kind !== 'circuit') ensuite += rowItem(bi, ii, i, true);
     });
     else if (b.cardio) {
       const c = (l.cardio || []).find(x => x.machine === b.cardio.machine);
@@ -396,92 +557,125 @@ function vLive(l) {
       else ensuite += rowCardio(bi, b, true);
     }
   });
-  return `<div class="live"><div><div class="k">En cours · ${min} min</div><h1>Séance d'Amine</h1></div>
+  return `<div class="live"><div><div class="k" style="color:#5BD83A">● En cours · ${min} min</div><h1>${esc(s.name)}</h1>${l.date === today() && prop(l.date) && prop(l.date).form ? `<div class="sb">Forme du jour : ${esc(prop(l.date).form.toLowerCase())}</div>` : ''}</div>
     <div class="right">${l.hr ? `<b style="font-size:20px;color:#5BD83A">♥ ${l.hr}</b><br>` : ''}${l.kcal ? Math.round(l.kcal) + ' kcal' : ''}</div></div>
     ${fait ? '<div class="k">Fait</div>' + fait : ''}
     <div class="k">Maintenant</div><div class="row hl"><div class="grow"><div class="nm">${esc(l.current || '—')}</div></div></div>
     <div class="k">Ensuite · tu peux encore tout changer</div>${ensuite || '<div class="mini">Plus rien de prévu.</div>'}
     <button class="add" onclick="A.pick('add')">+ Ajouter un exercice</button>
     ${D.dirty ? `<button class="main" onclick="A.validate()">Envoyer les changements à la montre</button>` : ''}
-    <div class="box" style="background:var(--hero)">Chaque changement arrive sur la montre d'Amine en quelques secondes. Il n'a rien à saisir.</div>`;
+    <div class="box" style="background:var(--hero)">Pendant la séance, un changement arrive sur la montre en moins d'une minute. Amine n'a rien à saisir.</div>`;
 }
 
+function stepperHtml(on, v, u) { return `<div class="step"><button class="sbtn" aria-label="moins" onclick="${on(-1)}">−</button><div><div class="val">${v}</div>${u ? `<div class="unit">${u}</div>` : ''}</div><button class="sbtn" aria-label="plus" onclick="${on(1)}">+</button></div>`; }
+const backBar = t => `<div style="display:flex;align-items:center;gap:10px"><button class="chip" onclick="A.back()">‹</button><h1 style="font-size:18px">${t}</h1></div>`;
+
 function vEdit(bi, ii) {
-  const i = item(bi, ii); if (!i) { sub = null; return vSeance(); }
+  const b = D.session.blocks[bi]; const i = b && b.items[ii]; if (!i) { sub = { day: D.date }; return vDay(D.date); }
   const e = libMap()[i.ex] || {};
-  const p = proposal();
-  const sug = p && p.date === D.date ? (p.session.blocks.flatMap(b => b.items || []).find(x => x.ex === i.ex) || {}).kg : null;
-  const timed = i.seconds > 0 && i.repMax <= 1;
-  const stepper = (f, v, u, d) => `<div class="step"><button class="sbtn" aria-label="moins" onclick="A.step(${bi},${ii},'${f}',${-d})">−</button><div><div class="val">${v}</div>${u ? `<div class="unit">${u}</div>` : ''}</div><button class="sbtn" aria-label="plus" onclick="A.step(${bi},${ii},'${f}',${d})">+</button></div>`;
+  const inCirc = b.kind === 'circuit';
+  const p = prop(D.date);
+  const sug = p ? (p.session.blocks.flatMap(x => x.items || []).find(x => x.ex === i.ex) || {}).kg : null;
+  const timed = i.seconds > 0 || (inCirc && i.repMax <= 1);
+  const st = (f, v, u, d) => stepperHtml(s => `A.step(${bi},${ii},'${f}',${s * d})`, v, u);
   const parts = (i.note || '').split(' · ');
-  return `<div style="display:flex;align-items:center;gap:10px"><button class="chip" onclick="A.back()">‹ Séance</button><h1 style="font-size:18px">${esc(name(i.ex))}</h1></div>
+  return `${backBar(esc(name(i.ex)))}
     <div class="hero">${photo(i.ex, 'hero-img').replace('class="hero-img"', 'style="width:100%;height:100%;object-fit:cover"')}</div>
     ${e.risk ? '<div class="box warn">⚠ Charge le bas du dos d\'Amine : version avec appui ou plus légère.</div>' : ''}
+    ${slamRisk(i) ? `<div class="prop"><b>Slam ball :</b> Amine a une hernie L5-S1. Garder le dos droit et plier les genoux, ou le remplacer par un lancer contre le mur.<div style="margin-top:8px"><button class="btn2" onclick="A.slam(${bi},${ii})">Remplacer par lancer au mur</button></div></div>` : ''}
     <div style="font-size:13px;color:#C9CDD3">${e.last ? 'Dernière fois : ' + esc(e.last) : 'Jamais fait dans Sahti'}${sug != null ? ` · <span style="color:var(--mint)">Sahti propose ${num(sug)} kg</span>` : ''}</div>
-    <div class="k">Séries</div>${stepper('sets', i.sets, '', 1)}
-    <div class="grid2"><div><div class="k" style="margin-bottom:6px">${timed ? 'Durée' : 'Répétitions'}</div>${timed ? stepper('sec', i.seconds, 's', 5) : stepper('reps', reps(i), '', 1)}</div>
-    <div><div class="k" style="margin-bottom:6px">Charge</div>${stepper('kg', i.kg != null ? num(i.kg) : '—', 'kg', 2.5)}</div></div>
+    ${inCirc ? `<div class="chips"><button class="chip ${timed ? 'on' : ''}" onclick="A.cmode(${bi},${ii},'time')">En temps</button><button class="chip ${timed ? '' : 'on'}" onclick="A.cmode(${bi},${ii},'reps')">En répétitions</button></div>`
+             : `<div class="k">Séries</div>${st('sets', i.sets, '', 1)}`}
+    <div class="grid2"><div><div class="k" style="margin-bottom:6px">${timed ? 'Durée' : 'Répétitions'}</div>${timed ? st('sec', i.seconds || b.circuit.workSec, 's', 5) : st('reps', reps(i), '', 1)}</div>
+    <div><div class="k" style="margin-bottom:6px">Charge</div>${st('kg', i.kg != null ? num(i.kg) : '—', 'kg', inCirc ? 1 : 2.5)}</div></div>
     <div class="k">Consigne pour Amine (facultatif)</div>
     <div class="chips">${TIPS.map(t => `<button class="chip ${parts.includes(t) ? 'on' : ''}" onclick="A.tip(${bi},${ii},'${t}')">${t}</button>`).join('')}<button class="chip" onclick="A.tipText(${bi},${ii})">+ texte</button></div>
     ${i.note ? `<div class="mini">Affiché sur la montre : « ${esc(i.note)} »</div>` : ''}
     <div class="grid2"><button class="q" onclick="A.pick('replace',${bi},${ii})">⇄ Remplacer</button><button class="q" style="color:var(--red)" onclick="A.remove(${bi},${ii})">Supprimer</button></div>
-    <button class="main" onclick="A.back()">OK</button>`;
+    <button class="main static" onclick="A.back()">OK</button>`;
 }
 
 function vEditC(bi) {
-  const b = D.session.blocks[bi]; if (!b || !b.cardio) { sub = null; return vSeance(); }
+  const b = D.session.blocks[bi]; if (!b || !b.cardio) { sub = { day: D.date }; return vDay(D.date); }
   const c = b.cardio;
-  const tread = /tapis/i.test(b.title + c.machine) || c.speed != null;
-  const st = (f, v, u, d) => `<div class="step"><button class="sbtn" aria-label="moins" onclick="A.stepC(${bi},'${f}',${-d})">−</button><div><div class="val">${v}</div><div class="unit">${u}</div></div><button class="sbtn" aria-label="plus" onclick="A.stepC(${bi},'${f}',${d})">+</button></div>`;
-  return `<div style="display:flex;align-items:center;gap:10px"><button class="chip" onclick="A.back()">‹ Séance</button><h1 style="font-size:18px">${esc(b.title)}</h1></div>
+  const tread = /tapis/i.test(b.title + c.machine);
+  const st = (f, v, u, d) => stepperHtml(s => `A.stepC(${bi},'${f}',${s * d})`, v, u);
+  return `${backBar(esc(b.title))}
+    <div class="k">Machine</div><div class="chips">${MACHINES.map(m => `<button class="chip ${c.machine === m || b.title === m ? 'on' : ''}" onclick="A.machine(${bi},${js(m)})">${m}</button>`).join('')}</div>
     <div class="k">Durée</div>${st('min', c.minutes, 'min', 1)}
     ${tread ? `<div class="k">Pente</div>${st('inc', num(c.incline || 0) + ' %', 'pente', 0.5)}<div class="k">Vitesse</div>${st('spd', num(c.speed || 3), 'km/h', 0.1)}`
             : `<div class="k">Niveau</div>${st('lvl', c.level || 5, 'résistance', 1)}`}
-    <div class="mini">Amine peut ajuster pendant l'effort sur sa montre.</div>
+    <div class="mini">La récupération (retour au calme) est celle proposée par la machine. Amine peut ajuster pendant l'effort sur sa montre.</div>
     <button class="q" style="color:var(--red)" onclick="A.removeC(${bi})">Supprimer</button>
-    <button class="main" onclick="A.back()">OK</button>`;
+    <button class="main static" onclick="A.back()">OK</button>`;
+}
+
+function vEditI(bi) {
+  const b = D.session.blocks[bi]; if (!b) { sub = { day: D.date }; return vDay(D.date); }
+  const cur = (b.title.split('·')[1] || '').trim();
+  return `${backBar(esc(b.title))}
+    ${b.kind === 'warmup' ? `<div class="k">Machine</div><div class="chips">${MACHINES.map(m => `<button class="chip ${cur === m ? 'on' : ''}" onclick="A.machine(${bi},${js(m)})">${m}</button>`).join('')}</div>` : ''}
+    <div class="k">Durée</div>${stepperHtml(s => `A.stepI(${bi},${s})`, b.minutes, 'min')}
+    ${b.detail ? `<div class="box">${esc(b.detail)}</div>` : ''}
+    <button class="q" style="color:var(--red)" onclick="A.removeC(${bi})">Supprimer</button>
+    <button class="main static" onclick="A.back()">OK</button>`;
+}
+
+function vCirc(bi) {
+  const b = D.session.blocks[bi]; if (!b || !b.circuit) { sub = { day: D.date }; return vDay(D.date); }
+  const c = b.circuit;
+  const st = (f, v, u, d) => stepperHtml(s => `A.stepK(${bi},'${f}',${s * d})`, v, u);
+  const slam = b.items.findIndex(slamRisk);
+  return `${backBar('Circuit')}
+    <div class="mini">Les exercices s'enchaînent ; la montre d'Amine compte le temps, les tours et les repos, et vibre à chaque changement.</div>
+    <div class="grid2"><div><div class="k" style="margin-bottom:6px">Tours</div>${st('rounds', c.rounds, '', 1)}</div><div><div class="k" style="margin-bottom:6px">Travail</div>${st('work', c.workSec + ' s', '', 5)}</div>
+    <div><div class="k" style="margin-bottom:6px">Repos entre exercices</div>${st('rest', c.restSec + ' s', '', 5)}</div><div><div class="k" style="margin-bottom:6px">Repos entre tours</div>${st('rrest', c.roundRestSec + ' s', '', 15)}</div></div>
+    <div class="k">Exercices · ${b.items.length}</div>
+    ${b.items.map((i, ii) => `<div class="row ${slamRisk(i) ? 'chgd' : ''}"><div class="ph" style="font-size:15px">${ii + 1}</div><div class="grow"><div class="nm">${esc(name(i.ex))}</div>
+      <div class="sb">${i.kg != null ? num(i.kg) + ' kg · ' : ''}${i.seconds > 0 ? i.seconds + ' s' : i.repMax > 1 ? i.repMax + ' répétitions' : c.workSec + ' s'}</div>${slamRisk(i) ? '<span class="tg warnt">dos : à adapter</span>' : ''}</div>
+      <button class="btn2" onclick="A.edit(${bi},${ii})">Modifier</button></div>`).join('')}
+    <button class="add" onclick="A.pick('addc',${bi})">+ Ajouter au circuit</button>
+    ${slam >= 0 ? `<div class="prop"><b>Slam ball :</b> Amine a une hernie L5-S1. Garder le dos droit et plier les genoux, ou le remplacer par un lancer contre le mur.<div style="margin-top:8px"><button class="btn2" onclick="A.slam(${bi},${slam})">Remplacer par lancer au mur</button></div></div>` : ''}
+    <div class="d"><span><b>Durée du circuit</b><br><span class="mini" style="padding:0">${c.rounds} tours × ${b.items.length} exercices</span></span><b style="font-size:20px">≈ ${blockMin(b)} min</b></div>
+    <button class="q" style="color:var(--red)" onclick="A.removeC(${bi})">Supprimer le circuit</button>
+    <button class="main static" onclick="A.back()">OK</button>`;
 }
 
 function vPick() {
   const p = sub.pick;
   const cur = p.mode === 'replace' && p.ii != null ? item(p.bi, p.ii) : null;
   const curGroup = cur && libMap()[cur.ex] ? libMap()[cur.ex].group : null;
-  const g = group || curGroup || 'Dos';
+  const g = group || curGroup || (p.mode === 'addc' ? 'Gainage' : 'Dos');
   const list = lib().filter(e => e.group === g && (!cur || e.id !== cur.ex)).sort((a, b) => (a.risk - b.risk) || (b.last ? 1 : 0) - (a.last ? 1 : 0));
-  return `<div style="display:flex;align-items:center;gap:10px"><button class="chip" onclick="A.back()">‹</button><h1 style="font-size:18px">${cur ? 'Remplacer ' + esc(name(cur.ex)) : 'Ajouter un exercice'}</h1></div>
+  return `${backBar(cur ? 'Remplacer ' + esc(name(cur.ex)) : p.mode === 'addc' ? 'Ajouter au circuit' : 'Ajouter un exercice')}
     <div class="chips">${GROUPS.map(x => `<button class="chip ${x === g ? 'on' : ''}" onclick="A.group('${x}')">${x}</button>`).join('')}</div>
-    <div class="mini">Les machines de la salle${curGroup ? ' · même muscle en premier' : ''}</div>
+    <div class="mini">Les machines de la salle${curGroup ? ' · même muscle en premier' : ''}${p.mode === 'addc' ? ' · « + Autre » pour un mouvement libre (ballon, montées de genoux…)' : ''}</div>
     <div class="grid2">${list.map(e => `<button class="card ${e.risk ? 'risk' : ''}" onclick="A.choose(${js(e.id)})">${photo(e.id, 'cimg').replace('class="cimg"', '')}
       <div class="cn">${e.risk ? '⚠ ' : ''}${esc(e.name)}</div><div class="cs">${e.risk ? 'charge le bas du dos' : e.last ? esc(e.last.split(' · ')[0]) : 'jamais fait'}</div></button>`).join('')}
       <button class="card" style="border-style:dashed;align-items:center;justify-content:center;min-height:150px" onclick="A.other()"><div class="cn" style="padding:0">+ Autre</div><div class="cs" style="padding:4px 10px 0">nom libre</div></button></div>`;
 }
 
-function vHeures() {
+function vMove(date) {
   const all = slots();
-  const next = all.find(s => s.status !== 'off');
-  if (sub && sub.move) {
-    const s = all.find(x => x.date === sub.move) || next;
-    const days = Array.from({ length: 8 }, (_, i) => { const d = new Date(Date.now() + i * 86400e3); return new Date(d - d.getTimezoneOffset() * 60000).toISOString().slice(0, 10); });
-    return `<div style="display:flex;align-items:center;gap:10px"><button class="chip" onclick="A.back()">‹</button><h1 style="font-size:18px">Autre jour ou autre heure</h1></div>
-      <div class="k">Jour</div><select id="md">${days.map(d => `<option value="${d}" ${d === s.date ? 'selected' : ''}>${dayLabel(d, true)}</option>`).join('')}</select>
-      <div class="k">Heure</div><input id="mt" type="time" value="${s.time}">
-      <button class="main" onclick="A.moveSave('${s.date}')">Proposer à Amine</button>
-      <button class="q" style="color:var(--red)" onclick="A.slot('${s.date}',{status:'off',by:'hamza'})">Annuler cette séance</button>`;
-  }
-  let h = `<div><div class="k">Sahti · coach</div><h1>Heures d'Amine</h1></div>`;
-  if (!next) return h + `<div class="empty">Pas encore d'heures reçues de Sahti.</div>`;
-  const ambine = next.status === 'prop' && next.by === 'amine';
-  h += `<div class="slot"><div class="k">Prochaine séance</div>
-    <div style="display:flex;justify-content:space-between;align-items:baseline;gap:8px"><div style="font-size:24px;font-weight:800">${dayLabel(next.date, true)} · ${hour(next.time)}</div>
-    <span class="pill ${next.status === 'ok' ? 'ok' : 'wait'}">${next.status === 'ok' ? 'confirmée' : next.by === 'hamza' ? 'attend Amine' : 'à confirmer'}</span></div>
-    ${ambine ? '' : `<div class="k">Décaler</div><div class="grid4">${[[-60, '−1 h'], [-30, '−30'], [30, '+30'], [60, '+1 h']].map(([m, t]) => `<button class="q" onclick="A.shift('${next.date}',${m})">${t}</button>`).join('')}</div>`}
-    <button class="q" style="background:transparent;border:1px solid #45484D" onclick="A.move('${next.date}')">Autre heure ou autre jour</button></div>`;
-  all.filter(s => s.status === 'prop' && s.by === 'amine').forEach(s => {
-    h += `<div class="prop"><b>Amine propose : ${dayLabel(s.date, true).toLowerCase()} à ${hour(s.time)}</b>${s.prev ? ' (au lieu de ' + (s.prev.includes('-') ? dayLabel(s.prev).toLowerCase() : hour(s.prev)) + ')' : ''}${s.note ? ' · ' + esc(s.note) : ''}.
-      <div class="grid2" style="margin-top:10px"><button class="main" style="position:static;padding:11px;font-size:14px" onclick="A.slot('${s.date}',{status:'ok'})">Accepter</button><button class="q" onclick="A.move('${s.date}')">Autre heure</button></div></div>`;
-  });
-  h += `<div class="k">La semaine</div>` + all.map(s => `<div class="d"><span>${dayLabel(s.date)}</span><span style="font-weight:800;${s.status === 'prop' ? 'color:var(--amber)' : s.status === 'off' ? 'color:var(--muted);text-decoration:line-through' : ''}">${hour(s.time)} ${s.status === 'ok' ? '✓' : s.status === 'prop' ? '?' : ''}</span></div>`).join('');
-  return h + `<div class="small">Chaque changement s'affiche aussitôt chez Amine : téléphone et montre.</div>`;
+  const s = all.find(x => x.date === date) || { date, time: '17:30' };
+  const ds = Array.from({ length: 8 }, (_, i) => { const d = new Date(Date.now() + i * 86400e3); return new Date(d - d.getTimezoneOffset() * 60000).toISOString().slice(0, 10); });
+  return `${backBar('Autre jour ou autre heure')}
+    <div class="k">Décaler</div><div class="grid4">${[[-60, '−1 h'], [-30, '−30'], [30, '+30'], [60, '+1 h']].map(([m, t]) => `<button class="q" onclick="A.shift('${s.date}',${m})">${t}</button>`).join('')}</div>
+    <div class="k">Jour</div><select id="md">${ds.map(d => `<option value="${d}" ${d === s.date ? 'selected' : ''}>${dayLabel(d, true)}</option>`).join('')}</select>
+    <div class="k">Heure</div><input id="mt" type="time" value="${s.time}">
+    <button class="main static" onclick="A.moveSave('${s.date}')">Proposer à Amine</button>
+    <button class="q" style="color:var(--red)" onclick="A.slot('${s.date}',{status:'off',by:'hamza'})">Annuler cette séance</button>`;
+}
+A.shift = (date, min) => {
+  const s = slots().find(x => x.date === date); if (!s) return;
+  const [h, m] = s.time.split(':').map(Number); const t = h * 60 + m + min;
+  A.slot(date, { time: String(Math.floor(t / 60) % 24).padStart(2, '0') + ':' + String(t % 60).padStart(2, '0'), status: 'prop', by: 'hamza' });
+};
+
+function vLiveTab() {
+  const l = live();
+  if (l) return vLive(l);
+  return `<div><div class="k">Sahti · coach</div><h1>En cours</h1></div><div class="empty">Pas de séance en cours.<br>Cet onglet s'anime dès qu'Amine démarre sa séance sur la montre : tu vois chaque série et tu peux changer la suite.</div>`;
 }
 
 function vBilan() {
@@ -490,25 +684,30 @@ function vBilan() {
   const back = ['aucune gêne', 'gêne légère', 'gêne signalée'][b.back] || null;
   return `<div><div class="k">Terminée · ${dayLabel(b.date, true)}</div><h1>Bilan d'Amine</h1></div>
     <div class="tiles"><div class="tile"><b>${b.minutes}</b><span class="mini">min</span></div><div class="tile"><b>${b.sets}</b><span class="mini">séries</span></div><div class="tile"><b>${b.kcal ?? '—'}</b><span class="mini">kcal</span></div></div>
-    <div class="box">${b.rir != null ? `Effort ${b.rir >= 1.5 && b.rir <= 3 ? 'bien dosé' : b.rir < 1.5 ? 'très dur' : 'facile'} : RIR moyen ${num(b.rir)}.<br>` : ''}${back ? `Dos : ${back}.<br>` : ''}${b.avgHr ? `Cœur moyen ${b.avgHr}.<br>` : ''}${(b.skipped || []).length ? `<span class="warn">Pas fait : ${b.skipped.map(esc).join(', ')}.</span>` : ''}</div>
+    <div class="box">${b.rir != null ? `Effort ${b.rir >= 1.5 && b.rir <= 3 ? 'bien dosé' : b.rir < 1.5 ? 'très dur' : 'facile'} : ${num(b.rir)} répétitions en réserve en moyenne.<br>` : ''}${back ? `Dos : ${back}.<br>` : ''}${b.avgHr ? `Cœur moyen ${b.avgHr}.<br>` : ''}${(b.skipped || []).length ? `<span class="warn">Pas fait : ${b.skipped.map(esc).join(', ')}.</span>` : ''}</div>
     ${(b.progress || []).length ? `<div class="k">Progrès sur 4 semaines</div><div class="box" style="padding:4px 14px">${b.progress.map(p => `<div class="pr"><span>${esc(p.name)}</span><span class="${p.trend > 0 ? 'up' : ''}" style="font-weight:800">${esc(p.text)} ${p.trend > 0 ? '↑' : p.trend < 0 ? '↓' : ''}</span></div>`).join('')}</div>` : ''}
     ${(b.week || []).length ? `<div class="box"><div class="k" style="margin-bottom:6px">Semaine</div><div class="wk">${b.week.map(w => `<div class="${w.includes('✓') ? 'ok' : ''}">${esc(w)}</div>`).join('')}</div></div>` : ''}
-    <button class="q" onclick="A.tab('seance')">Préparer la prochaine séance</button>`;
+    <button class="q" onclick="A.tab('semaine')">Préparer la prochaine séance</button>`;
 }
 
 function render() {
   const app = document.getElementById('app');
   if (!KEY) { app.innerHTML = `<div class="empty"><h1>Sahti Coach</h1><br>Lien incomplet.<br>Demande à Amine de te renvoyer le lien depuis Sahti.</div>`; document.getElementById('nav').innerHTML = ''; return; }
   let h;
-  if (view === 'seance') {
-    ensureDraft();
-    h = sub && sub.edit ? vEdit(sub.edit.bi, sub.edit.ii) : sub && sub.editC != null ? vEditC(sub.editC) : sub && sub.pick ? vPick() : vSeance();
-  } else if (view === 'heures') h = vHeures();
-  else h = vBilan();
+  if (sub && sub.edit) h = vEdit(sub.edit.bi, sub.edit.ii);
+  else if (sub && sub.editC != null) h = vEditC(sub.editC);
+  else if (sub && sub.editI != null) h = vEditI(sub.editI);
+  else if (sub && sub.circ != null) h = vCirc(sub.circ);
+  else if (sub && sub.pick) h = vPick();
+  else if (sub && sub.move) h = vMove(sub.move);
+  else if (sub && sub.day) h = vDay(sub.day);
+  else if (view === 'live') h = vLiveTab();
+  else if (view === 'bilan') h = vBilan();
+  else h = vSemaine();
   app.innerHTML = h;
   const l = live();
-  document.getElementById('nav').innerHTML = [['seance', l ? 'En direct' : 'Séance', IC.dumb], ['heures', 'Heures', IC.cal], ['bilan', 'Bilan', IC.chart]]
-    .map(([v, t, i]) => `<button class="${view === v ? 'on' : ''}" onclick="A.tab('${v}')">${i}${t}</button>`).join('');
+  document.getElementById('nav').innerHTML = [['semaine', 'Semaine', IC.cal], ['live', 'En cours', IC.dot], ['bilan', 'Bilan', IC.chart]]
+    .map(([v, t, i]) => `<button class="${view === v && !(sub && sub.day) ? 'on' : ''} ${v === 'live' && l ? 'pulse' : ''}" onclick="A.tab('${v}')">${i}${t}</button>`).join('');
 }
 
 (async function start() {

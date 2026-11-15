@@ -102,6 +102,7 @@ nav button.pulse{color:#5BD83A}
 .demo .d2{animation:demo2 2.6s infinite}
 @keyframes demo2{0%,40%{opacity:0}50%,90%{opacity:1}100%{opacity:0}}
 .demo span{position:absolute;left:8px;top:8px;background:#000a;color:#fff;font-size:11px;font-weight:800;border-radius:8px;padding:3px 8px}
+.mv{display:flex;flex-direction:column;gap:4px;margin-right:2px}.mvb{width:34px;height:28px;border:0;border-radius:9px;background:#262B33;color:#fff;font-size:12px;font-family:inherit;cursor:pointer}.mvb:active{background:#3DDBB0;color:#06291F}
 </style>
 </head>
 <body>
@@ -264,6 +265,8 @@ function changes() {
   Object.keys(o).forEach(k => { if (!n[k]) c++; });
   const cs = s => (s.blocks || []).filter(b => !isStrength(b) && b.kind !== 'circuit').map(b => b.kind + b.title + b.minutes + JSON.stringify(b.cardio || '') + JSON.stringify(b.circuit || '')).join('|');
   if (cs(D.orig) !== cs(D.session)) c++;
+  const ord = s => (s.blocks || []).flatMap(b => (b.items || []).map(i => i.ex)).filter(k => o[k] && n[k]).join('|');
+  if (ord(D.orig) !== ord(D.session)) c++; // ordre des exercices changé
   return c;
 }
 
@@ -361,6 +364,18 @@ const A = {
     D.session.blocks[bi].items.splice(ii, 1);
     if (!D.session.blocks[bi].items.length && D.session.blocks[bi].kind === 'circuit') D.session.blocks.splice(bi, 1);
     A.back(); dirty();
+  },
+  mv(bi, ii, d) {
+    const bl = D.session.blocks; const b = bl[bi]; const j = ii + d;
+    if (j >= 0 && j < b.items.length) { const t = b.items[ii]; b.items[ii] = b.items[j]; b.items[j] = t; dirty(); return; }
+    // au bord du bloc : passe dans le bloc de renforcement voisin
+    for (let k = bi + d; k >= 0 && k < bl.length; k += d) if (isStrength(bl[k])) {
+      const [it] = b.items.splice(ii, 1);
+      if (d < 0) bl[k].items.push(it); else bl[k].items.unshift(it);
+      if (!b.items.length) bl.splice(bi, 1);
+      dirty(); return;
+    }
+    toast(d < 0 ? 'Déjà le premier exercice' : 'Déjà le dernier exercice');
   },
   removeC(bi) { D.session.blocks.splice(bi, 1); sub = { day: D.date }; dirty(); },
   slam(bi, ii) { Object.assign(item(bi, ii), { ex: 'perso:Lancer contre le mur', kg: 3 }); dirty(); },
@@ -484,7 +499,7 @@ function rowItem(bi, ii, i, editable) {
     <div class="grow"><div class="nm">${e.risk || slamRisk(i) ? '⚠ ' : ''}${esc(name(i.ex))}</div><div class="sb">${itemLine(i)}</div>
     ${e.last ? `<div class="sb">Dernière fois : ${esc(e.last)}</div>` : ''}
     ${i.note ? `<span class="tg n">${esc(i.note)}</span> ` : ''}${badge}</div>
-    ${editable ? `<button class="btn2" onclick="A.edit(${bi},${ii})">Modifier</button>` : ''}</div>`;
+    ${editable ? `<div class="mv"><button class="mvb" aria-label="Monter" onclick="A.mv(${bi},${ii},-1)">▲</button><button class="mvb" aria-label="Descendre" onclick="A.mv(${bi},${ii},1)">▼</button></div><button class="btn2" onclick="A.edit(${bi},${ii})">Modifier</button>` : ''}</div>`;
 }
 function rowCardio(bi, b, editable) {
   return `<div class="row"><div class="ph">${machIcon(b.title + ' ' + b.cardio.machine)}</div><div class="grow"><div class="nm">${esc(b.title)}</div><div class="sb">${cardioLine(b.cardio)}</div><div class="sb">+ récupération de la machine</div></div>

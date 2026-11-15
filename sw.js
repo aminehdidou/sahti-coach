@@ -1,5 +1,5 @@
 // Sahti Coach : la page s'ouvre même avec un réseau faible (les séances, elles, passent toujours par le relais chiffré)
-const C = 'sahti-coach-v3';
+const C = 'sahti-coach-v4';
 self.addEventListener('install', e => { self.skipWaiting(); e.waitUntil(caches.open(C).then(c => c.addAll(['./', 'index.html', 'manifest.webmanifest', 'icon-192.png']))); });
 self.addEventListener('activate', e => e.waitUntil(caches.keys().then(ks => Promise.all(ks.filter(k => k !== C).map(k => caches.delete(k)))).then(() => self.clients.claim())));
 self.addEventListener('fetch', e => {

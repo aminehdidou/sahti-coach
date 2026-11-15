@@ -297,10 +297,20 @@ const A = {
   pick(mode, bi, ii) { sub = { pick: { mode, bi, ii, from: sub } }; group = null; render(); top0(); },
   step(bi, ii, f, d) {
     const it = item(bi, ii);
-    if (f === 'sets') it.sets = Math.max(Math.max(1, doneSets(it.ex).length), it.sets + d);
+    if (f === 'sets') {
+      it.sets = Math.max(Math.max(1, doneSets(it.ex).length), it.sets + d);
+      if ((it.kgs || []).length > 1) { while (it.kgs.length < it.sets) it.kgs.push(it.kgs[it.kgs.length - 1] + 2.5); it.kgs = it.kgs.slice(0, it.sets); it.kg = it.kgs[it.kgs.length - 1]; }
+    }
     if (f === 'reps') { const v = Math.max(1, it.repMax + d); it.repMax = v; it.repMin = Math.min(it.repMin, v); if (d < 0 || it.repMin === it.repMax - d) it.repMin = v; }
     if (f === 'sec') it.seconds = Math.max(5, (it.seconds || 30) + d);
     if (f === 'kg') it.kg = Math.max(0, Math.round(((it.kg || 0) + d) * 10) / 10);
+    dirty();
+  },
+  stepKs(bi, ii, n, d) { const it = item(bi, ii); it.kgs[n] = Math.max(0, Math.round((it.kgs[n] + d) * 10) / 10); it.kg = it.kgs[it.kgs.length - 1]; dirty(); },
+  ladder(bi, ii, on) {
+    const it = item(bi, ii);
+    if (on) { const top = it.kg != null ? it.kg : 20; it.kgs = Array.from({ length: it.sets }, (_, k) => Math.max(0, top - (it.sets - 1 - k) * 5)); it.kg = top; }
+    else { it.kg = (it.kgs || []).length ? it.kgs[it.kgs.length - 1] : it.kg; it.kgs = []; }
     dirty();
   },
   cmode(bi, ii, m) { const it = item(bi, ii); if (m === 'time') { it.repMin = it.repMax = 1; it.seconds = D.session.blocks[bi].circuit.workSec; } else { it.seconds = 0; it.repMin = it.repMax = 12; } dirty(); },
@@ -436,12 +446,15 @@ const A = {
 // ---------- Rendu ----------
 const photo = (id, cls = 'ph') => `<img class="${cls}" src="img/${encodeURIComponent(id)}.jpg" alt="" loading="lazy" onerror="this.outerHTML='<div class=&quot;${cls === 'ph' ? 'ph' : 'noimg'}&quot;>${esc(name(id).charAt(0))}</div>'">`;
 function reps(i) { return i.seconds > 0 && i.repMax <= 1 ? `${i.seconds} s` : (i.repMin === i.repMax ? i.repMax : `${i.repMin}-${i.repMax}`); }
-function itemLine(i) { return `${i.sets} × ${reps(i)}` + (i.kg != null ? ` · ${num(i.kg)} kg` : ''); }
+function itemLine(i) { return `${i.sets} × ${reps(i)}` + ((i.kgs || []).length > 1 ? ` · ${i.kgs.map(num).join(' → ')} kg` : i.kg != null ? ` · ${num(i.kg)} kg` : ''); }
 function cardioLine(c) { return [c.minutes + ' min', c.incline != null && c.incline !== '' ? num(c.incline) + ' %' : null, c.speed ? num(c.speed) + ' km/h' : null, c.level ? 'niveau ' + c.level : null].filter(Boolean).join(' · '); }
 const IC = {
   tread: '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" aria-hidden="true"><path d="M3 19l17-5M17 14l1-9h2"/><circle cx="10" cy="6" r="1.5"/><path d="M10 8l-1 4 2 2"/></svg>',
   bike: '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" aria-hidden="true"><circle cx="6" cy="17" r="3"/><circle cx="18" cy="17" r="3"/><path d="M9 17h6M12 6l3 11"/></svg>',
   ellip: '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" aria-hidden="true"><circle cx="12" cy="5" r="2"/><path d="M7 21l3-7 2-4 3 3 3 1M5 12l5-2"/></svg>',
+  row: '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" aria-hidden="true"><path d="M2 19h20M5 19l3-6h7l4 6M9 13l2-5h3"/><circle cx="14" cy="5" r="1.5"/></svg>',
+  step: '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" aria-hidden="true"><rect x="4" y="14" width="7" height="6" rx="1"/><rect x="13" y="10" width="7" height="10" rx="1"/><path d="M8 14V9M16 10V5"/></svg>',
+  walk: '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" aria-hidden="true"><circle cx="13" cy="4" r="2"/><path d="M11 21l2-6 3 3v3M9 12l2-4 3 1 2 4M11 8l-3 2"/></svg>',
   stairs: '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" aria-hidden="true"><path d="M3 20h5v-5h5v-5h5V5h3"/></svg>',
   mob: '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" aria-hidden="true"><circle cx="12" cy="4" r="2"/><path d="M12 6v7M6 9l6 2 6-2M9 21l3-8 3 8"/></svg>',
   circ: '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" aria-hidden="true"><path d="M20 12a8 8 0 1 1-3-6.2M20 4v5h-5"/></svg>',
@@ -449,7 +462,7 @@ const IC = {
   chart: '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" aria-hidden="true"><path d="M4 20V10M10 20V4M16 20v-7M22 20H2"/></svg>',
   dot: '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" aria-hidden="true"><circle cx="12" cy="12" r="4" fill="currentColor"/><circle cx="12" cy="12" r="9"/></svg>',
 };
-const machIcon = t => /tapis/i.test(t) ? IC.tread : /v[ée]lo|bike|pikala/i.test(t) ? IC.bike : /escalier|stair|grimp/i.test(t) ? IC.stairs : IC.ellip;
+const machIcon = t => /tapis|treadmill/i.test(t) ? IC.tread : /rameur|rower/i.test(t) ? IC.row : /escalier|stair|grimp/i.test(t) ? IC.stairs : /stepper/i.test(t) ? IC.step : /marche/i.test(t) ? IC.walk : /v[ée]lo|bike|pikala/i.test(t) ? IC.bike : IC.ellip;
 const MACHINES = ['Tapis', 'Elliptique', 'Vélo', 'Grimpeur d\'escalier', 'Rameur'];
 const slamRisk = i => /slam/i.test(i.ex + name(i.ex));
 
@@ -542,7 +555,7 @@ function vDay(date) {
   const c = changes(), v = validated(date) && !D.dirty, t = timeOk(s);
   const label = v ? '✓ Validée · renvoyer' : (t ? '✓ Valider la séance' : '✓ Valider l\'heure et la séance') + (c ? ` (${c} changement${c > 1 ? 's' : ''})` : '');
   h += `<button class="main ${v ? 'off' : ''}" onclick="A.validate()">${label}</button>`;
-  h += `<div class="small">${t && !v ? 'L\'heure est déjà confirmée : il ne reste que la séance.<br>' : ''}Modifie autant d'exercices que tu veux, puis valide une seule fois.<br>Amine reçoit une notification ; la montre se met à jour dès qu'elle est connectée (en séance : moins d'une minute).</div>`;
+  h += `<div class="small">${t && !v ? 'L\'heure est déjà confirmée : il ne reste que la séance.<br>' : ''}Modifie autant d'exercices que tu veux, puis valide une seule fois.<br>Amine reçoit une notification ; la montre se met à jour à sa prochaine connexion. En séance, elle vérifie toutes les 20 secondes : le changement arrive en 20 à 40 secondes si elle a Internet (téléphone d'Amine à proximité ou wifi de la salle).</div>`;
   return h;
 }
 
@@ -571,7 +584,7 @@ function vLive(l) {
     <div class="k">Ensuite · tu peux encore tout changer</div>${ensuite || '<div class="mini">Plus rien de prévu.</div>'}
     <button class="add" onclick="A.pick('add')">+ Ajouter un exercice</button>
     ${D.dirty ? `<button class="main" onclick="A.validate()">Envoyer les changements à la montre</button>` : ''}
-    <div class="box" style="background:var(--hero)">Pendant la séance, un changement arrive sur la montre en moins d'une minute. Amine n'a rien à saisir.</div>`;
+    <div class="box" style="background:var(--hero)">Pendant la séance, la montre vérifie toutes les 20 secondes : ton changement arrive en 20 à 40 secondes si elle a Internet (téléphone d'Amine à proximité ou wifi de la salle). Amine n'a rien à saisir.</div>`;
 }
 
 function stepperHtml(on, v, u) { return `<div class="step"><button class="sbtn" aria-label="moins" onclick="${on(-1)}">−</button><div><div class="val">${v}</div>${u ? `<div class="unit">${u}</div>` : ''}</div><button class="sbtn" aria-label="plus" onclick="${on(1)}">+</button></div>`; }
@@ -594,7 +607,10 @@ function vEdit(bi, ii) {
     ${inCirc ? `<div class="chips"><button class="chip ${timed ? 'on' : ''}" onclick="A.cmode(${bi},${ii},'time')">En temps</button><button class="chip ${timed ? '' : 'on'}" onclick="A.cmode(${bi},${ii},'reps')">En répétitions</button></div>`
              : `<div class="k">Séries</div>${st('sets', i.sets, '', 1)}`}
     <div class="grid2"><div><div class="k" style="margin-bottom:6px">${timed ? 'Durée' : 'Répétitions'}</div>${timed ? st('sec', i.seconds || b.circuit.workSec, 's', 5) : st('reps', reps(i), '', 1)}</div>
-    <div><div class="k" style="margin-bottom:6px">Charge</div>${st('kg', i.kg != null ? num(i.kg) : '—', 'kg', inCirc ? 1 : 2.5)}</div></div>
+    ${(i.kgs || []).length > 1 ? '' : `<div><div class="k" style="margin-bottom:6px">Charge</div>${st('kg', i.kg != null ? num(i.kg) : '—', 'kg', inCirc ? 1 : 2.5)}</div>`}</div>
+    ${inCirc || timed ? '' : `<div class="chips"><button class="chip ${(i.kgs || []).length > 1 ? '' : 'on'}" onclick="A.ladder(${bi},${ii},false)">Même charge</button><button class="chip ${(i.kgs || []).length > 1 ? 'on' : ''}" onclick="A.ladder(${bi},${ii},true)">Charge montante</button></div>`}
+    ${(i.kgs || []).length > 1 ? `<div class="mini">Amine monte la charge à chaque série. La montre propose chaque série ; s'il change une charge, la suite garde le même écart.</div>
+      <div class="grid2">${i.kgs.map((k, n) => `<div><div class="k" style="margin-bottom:6px">Série ${n + 1}</div>${stepperHtml(s => `A.stepKs(${bi},${ii},${n},${s * 2.5})`, num(k), 'kg')}</div>`).join('')}</div>` : ''}
     <div class="k">Consigne pour Amine (facultatif)</div>
     <div class="chips">${TIPS.map(t => `<button class="chip ${parts.includes(t) ? 'on' : ''}" onclick="A.tip(${bi},${ii},'${t}')">${t}</button>`).join('')}<button class="chip" onclick="A.tipText(${bi},${ii})">+ texte</button></div>
     ${i.note ? `<div class="mini">Affiché sur la montre : « ${esc(i.note)} »</div>` : ''}

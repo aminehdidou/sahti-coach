@@ -97,6 +97,11 @@ input,select,textarea{font-family:inherit;font-size:16px;background:var(--card2)
 .wday{font-size:18px;font-weight:800}
 nav button.pulse{color:#5BD83A}
 .prop{margin:0}
+.demo{position:relative;height:200px;border-radius:16px;overflow:hidden;background:#fff}
+.demo img{position:absolute;inset:0;width:100%;height:100%;object-fit:contain}
+.demo .d2{animation:demo2 2.6s infinite}
+@keyframes demo2{0%,40%{opacity:0}50%,90%{opacity:1}100%{opacity:0}}
+.demo span{position:absolute;left:8px;top:8px;background:#000a;color:#fff;font-size:11px;font-weight:800;border-radius:8px;padding:3px 8px}
 </style>
 </head>
 <body>
@@ -444,7 +449,12 @@ const A = {
 };
 
 // ---------- Rendu ----------
-const photo = (id, cls = 'ph') => `<img class="${cls}" src="img/${encodeURIComponent(id)}.jpg" alt="" loading="lazy" onerror="this.outerHTML='<div class=&quot;${cls === 'ph' ? 'ph' : 'noimg'}&quot;>${esc(name(id).charAt(0))}</div>'">`;
+const FEDB = {"pont_ballon": "Physioball_Hip_Bridge", "pont_fessier": "Butt_Lift_Bridge", "step_up": "Step-up_with_Knee_Raise", "pallof": "Pallof_Press", "dead_bug": "Dead_Bug", "planche_laterale": "Side_Bridge", "presse": "Leg_Press", "dev_poitrine": "Machine_Bench_Press", "dev_epaules": "Machine_Shoulder_Military_Press", "leg_extension": "Leg_Extensions", "triceps_poulie": "Triceps_Pushdown", "tirage_vertical": "Wide-Grip_Lat_Pulldown", "rowing_appui": "Leverage_Iso_Row", "leg_curl": "Seated_Leg_Curl", "face_pull": "Face_Pull", "curl_machine": "Machine_Bicep_Curl", "goblet_squat": "Goblet_Squat", "dev_incline": "Leverage_Incline_Chest_Press", "tirage_horizontal": "Seated_Cable_Rows", "abducteurs": "Thigh_Abductor", "elevations_laterales": "Side_Lateral_Raise", "dev_halteres": "Dumbbell_Bench_Press", "pompes_inclinees": "Incline_Push-Up", "dev_epaules_halteres": "Seated_Dumbbell_Press", "triceps_halteres": "Dumbbell_One-Arm_Triceps_Extension", "rowing_unilateral": "One-Arm_Dumbbell_Row", "curl_ballon": "Ball_Leg_Curl", "face_pull_elastique": "Band_Pull_Apart", "curl_halteres": "Dumbbell_Bicep_Curl", "marche_laterale": "Monster_Walk", "pec_fly": "Butterfly", "oiseau_machine": "Reverse_Machine_Flyes", "rowing_tbar": "Lying_T-Bar_Row", "tirage_barre": "Close-Grip_Front_Lat_Pulldown"};
+const FE = 'https://raw.githubusercontent.com/yuhonas/free-exercise-db/main/exercises/';
+const demoUrls = id => FEDB[id] ? [FE + FEDB[id] + '/0.jpg', FE + FEDB[id] + '/1.jpg'] : [];
+/** Démonstration : position de départ puis d'arrivée, en boucle (photos du domaine public). */
+const demo = id => { const u = demoUrls(id); return u.length ? `<div class="demo"><img src="${u[0]}" alt="Départ"><img class="d2" src="${u[1]}" alt="Arrivée"><span>Démonstration</span></div>` : ''; };
+const photo = (id, cls = 'ph') => `<img class="${cls}" src="img/${encodeURIComponent(id)}.jpg" alt="" loading="lazy" onerror="${FEDB[id] ? `this.onerror=function(){this.outerHTML='<div class=&quot;${cls === 'ph' ? 'ph' : 'noimg'}&quot;>${esc(name(id).charAt(0))}</div>'};this.src='${FE + FEDB[id]}/0.jpg'` : `this.outerHTML='<div class=&quot;${cls === 'ph' ? 'ph' : 'noimg'}&quot;>${esc(name(id).charAt(0))}</div>'`}">`;
 function reps(i) { return i.seconds > 0 && i.repMax <= 1 ? `${i.seconds} s` : (i.repMin === i.repMax ? i.repMax : `${i.repMin}-${i.repMax}`); }
 function itemLine(i) { return `${i.sets} × ${reps(i)}` + ((i.kgs || []).length > 1 ? ` · ${i.kgs.map(num).join(' → ')} kg` : i.kg != null ? ` · ${num(i.kg)} kg` : ''); }
 function cardioLine(c) { return [c.minutes + ' min', c.incline != null && c.incline !== '' ? num(c.incline) + ' %' : null, c.speed ? num(c.speed) + ' km/h' : null, c.level ? 'niveau ' + c.level : null].filter(Boolean).join(' · '); }
@@ -601,6 +611,7 @@ function vEdit(bi, ii) {
   const parts = (i.note || '').split(' · ');
   return `${backBar(esc(name(i.ex)))}
     <div class="hero">${photo(i.ex, 'hero-img').replace('class="hero-img"', 'style="width:100%;height:100%;object-fit:cover"')}</div>
+    ${demo(i.ex)}
     ${e.risk ? '<div class="box warn">⚠ Charge le bas du dos d\'Amine : version avec appui ou plus légère.</div>' : ''}
     ${slamRisk(i) ? `<div class="prop"><b>Slam ball :</b> Amine a une hernie L5-S1. Garder le dos droit et plier les genoux, ou le remplacer par un lancer contre le mur.<div style="margin-top:8px"><button class="btn2" onclick="A.slam(${bi},${ii})">Remplacer par lancer au mur</button></div></div>` : ''}
     <div style="font-size:13px;color:#C9CDD3">${e.last ? 'Dernière fois : ' + esc(e.last) : 'Jamais fait dans Sahti'}${sug != null ? ` · <span style="color:var(--mint)">Sahti propose ${num(sug)} kg</span>` : ''}</div>

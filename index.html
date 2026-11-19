@@ -263,7 +263,7 @@ function changes() {
   let c = 0;
   Object.keys(n).forEach(k => { if (!o[k] || itemLine(o[k]) !== itemLine(n[k])) c++; });
   Object.keys(o).forEach(k => { if (!n[k]) c++; });
-  const cs = s => (s.blocks || []).filter(b => !isStrength(b) && b.kind !== 'circuit').map(b => b.kind + b.title + b.minutes + JSON.stringify(b.cardio || '') + JSON.stringify(b.circuit || '')).join('|');
+  const cs = s => (s.blocks || []).filter(b => !isStrength(b) && b.kind !== 'circuit').map(b => b.kind + b.title + b.minutes + (b.detail || '') + JSON.stringify(b.cardio || '') + JSON.stringify(b.circuit || '')).join('|');
   if (cs(D.orig) !== cs(D.session)) c++;
   const ord = s => (s.blocks || []).flatMap(b => (b.items || []).map(i => i.ex)).filter(k => o[k] && n[k]).join('|');
   if (ord(D.orig) !== ord(D.session)) c++; // ordre des exercices changé
@@ -294,13 +294,21 @@ const A = {
   day(date) { sub = { day: date }; open(date); render(); top0(); },
   back() {
     if (sub && sub.pick && sub.pick.from) sub = sub.pick.from;
-    else if (sub && (sub.edit || sub.editC != null || sub.editI != null || sub.circ != null || sub.move)) sub = sub.parent || (D ? { day: D.date } : null);
+    else if (sub && (sub.edit || sub.editC != null || sub.editI != null || sub.editM || sub.circ != null || sub.move)) sub = sub.parent || (D ? { day: D.date } : null);
     else sub = null;
     group = null; render(); top0();
   },
   edit(bi, ii) { sub = { edit: { bi, ii }, parent: sub }; render(); top0(); },
   editC(bi) { sub = { editC: bi, parent: sub }; render(); top0(); },
   editI(bi) { sub = { editI: bi, parent: sub }; render(); top0(); },
+  editM(bi, mi) { sub = { editM: { bi, mi }, parent: sub }; render(); top0(); },
+  moveStep(bi, mi, d) { const m = moves(bi)[mi], x = moveAmount(m.t); if (!x) return; const st = x.u === 's' ? 5 : 1; m.t = x.a + Math.max(1, x.n + d * st) + ' ' + x.u + x.z; syncMoves(bi); render(); },
+  moveText(bi, mi, v) { const t = cleanMove(v); if (t) { moves(bi)[mi].t = t; syncMoves(bi); } },
+  moveRm(bi, mi) { moves(bi)[mi].rm = true; syncMoves(bi); sub = sub.parent || { editI: bi }; render(); top0(); },
+  moveUndo(bi, mi) { moves(bi)[mi].rm = false; syncMoves(bi); render(); },
+  moveUp(bi, mi, d) { const a = moves(bi), j = mi + d; if (j < 0 || j >= a.length) return; [a[mi], a[j]] = [a[j], a[mi]]; syncMoves(bi); render(); },
+  moveAdd(bi, t) { const a = moves(bi); a.push({ t: cleanMove(t), rm: false, o: null }); syncMoves(bi); render(); },
+  moveAddFree(bi) { const v = (document.getElementById('mnew') || {}).value || ''; if (cleanMove(v)) A.moveAdd(bi, v); },
   circ(bi) { sub = { circ: bi, parent: sub && sub.circ != null ? sub.parent : sub }; render(); top0(); },
   pick(mode, bi, ii) { sub = { pick: { mode, bi, ii, from: sub } }; group = null; render(); top0(); },
   step(bi, ii, f, d) {
@@ -377,7 +385,7 @@ const A = {
     }
     toast(d < 0 ? 'Déjà le premier exercice' : 'Déjà le dernier exercice');
   },
-  removeC(bi) { D.session.blocks.splice(bi, 1); sub = { day: D.date }; dirty(); },
+  removeC(bi) { D.session.blocks.splice(bi, 1); D.mv = null; sub = { day: D.date }; dirty(); },
   slam(bi, ii) { Object.assign(item(bi, ii), { ex: 'perso:Lancer contre le mur', kg: 3 }); dirty(); },
   choose(id) {
     const p = sub.pick; const e = libMap()[id];
@@ -505,6 +513,27 @@ function rowCardio(bi, b, editable) {
   return `<div class="row"><div class="ph">${machIcon(b.title + ' ' + b.cardio.machine)}</div><div class="grow"><div class="nm">${esc(b.title)}</div><div class="sb">${cardioLine(b.cardio)}</div><div class="sb">+ récupération de la machine</div></div>
     ${editable ? `<button class="btn2" onclick="A.editC(${bi})">Modifier</button>` : ''}</div>`;
 }
+
+// ---------- Mobilité / retour au calme : mouvement par mouvement ----------
+const MOVE_LIB = ['Chat-vache 8 ×', 'Étirement du psoas genou au sol 2 × 30 s par côté (bassin rentré)', 'Ouverture de poitrine contre un montant de porte 30 s', 'Menton rentré 10 ×', 'Rotations d\'épaules 10 ×', 'Rotation thoracique en quadrupédie 8 × par côté', 'Posture de l\'enfant 30 s', 'Pont fessier 10 ×', 'Bird-dog 8 × par côté', 'Étirement des ischio-jambiers allongé 30 s par côté'];
+function splitMoves(d) {
+  const out = []; let cur = '', depth = 0;
+  for (const ch of d || '') {
+    if (ch === '(') depth++; if (ch === ')') depth = Math.max(0, depth - 1);
+    if (depth === 0 && (ch === ',' || ch === ';' || ch === '.')) { out.push(cur); cur = ''; } else cur += ch;
+  }
+  out.push(cur);
+  return out.map(x => x.trim().replace(/^puis\s+/i, '')).filter(Boolean);
+}
+const cleanMove = t => { let o = '', depth = 0; for (const ch of t || '') { if (ch === '(') depth++; if (ch === ')') depth = Math.max(0, depth - 1); o += depth === 0 && /[,;.]/.test(ch) ? ' ' : ch; } return o.replace(/\s+/g, ' ').trim(); };
+function moves(bi) {
+  D.mv = D.mv || {};
+  const b = D.session.blocks[bi];
+  if (!D.mv[bi]) D.mv[bi] = splitMoves(b.detail).map(t => ({ t, rm: false, o: t }));
+  return D.mv[bi];
+}
+function syncMoves(bi) { D.session.blocks[bi].detail = moves(bi).filter(m => !m.rm).map(m => m.t).join(', '); D.dirty = true; }
+const moveAmount = t => { const m = /^(.*?)(\d+)\s?(×|s|min)(?![a-zà-ÿ])(.*)$/.exec(t); return m ? { a: m[1], n: +m[2], u: m[3], z: m[4] } : null; };
 function rowInfo(bi, b) {
   return `<div class="row"><div class="ph">${b.kind === 'warmup' ? machIcon(b.title) : IC.mob}</div><div class="grow"><div class="nm">${esc(b.title)}</div><div class="sb">${b.minutes} min${b.detail ? ' · ' + esc(b.detail.slice(0, 70)) + (b.detail.length > 70 ? '…' : '') : ''}</div></div>
     <button class="btn2" onclick="A.editI(${bi})">Modifier</button></div>`;
@@ -659,14 +688,38 @@ function vEditC(bi) {
     <button class="main static" onclick="A.back()">OK</button>`;
 }
 
+
+function mobList(bi) {
+  const a = moves(bi), act = a.filter(m => !m.rm).length;
+  const rows = a.map((m, i) => m.rm
+    ? `<div class="row" style="opacity:.75"><div class="grow"><div class="nm" style="text-decoration:line-through">${esc(m.t)}</div><div class="sb">retiré</div></div><button class="btn2" onclick="A.moveUndo(${bi},${i})">Annuler le retrait</button></div>`
+    : `<div class="row"><div class="grow"><div class="nm">${esc(m.t)}</div>${m.o !== m.t ? `<div class="sb">${m.o ? 'modifié · avant : ' + esc(m.o) : 'ajouté'}</div>` : ''}</div>
+        <button class="btn2" aria-label="monter" onclick="A.moveUp(${bi},${i},-1)">▲</button><button class="btn2" aria-label="descendre" onclick="A.moveUp(${bi},${i},1)">▼</button>
+        <button class="btn2" onclick="A.editM(${bi},${i})">Modifier</button></div>`).join('');
+  const lib = MOVE_LIB.filter(t => !a.some(m => !m.rm && m.t === t));
+  return `<div class="k">Mouvements</div>${rows || '<div class="mini">Aucun mouvement.</div>'}
+    ${act === 0 && a.length ? `<div class="prop">Plus aucun mouvement : tu peux supprimer tout le bloc (bouton en bas).</div>` : ''}
+    <div class="k">+ Mouvement</div><div class="chips">${lib.map(t => `<button class="chip" onclick="A.moveAdd(${bi},${js(t)})">${esc(t.replace(/ \(.*\)/, ''))}</button>`).join('')}</div>
+    <input id="mnew" placeholder="Autre mouvement (ex. Pont fessier 10 ×)"><button class="q" onclick="A.moveAddFree(${bi})">Ajouter ce mouvement</button>`;
+}
+function vEditM(bi, mi) {
+  const m = (D.session.blocks[bi] && moves(bi)[mi]); if (!m) { sub = { editI: bi }; return vEditI(bi); }
+  const x = moveAmount(m.t);
+  return `${backBar('Mouvement')}
+    <div class="k">Nom et consigne</div><input value="${esc(m.t)}" onchange="A.moveText(${bi},${mi},this.value)">
+    ${x ? `<div class="k">${x.u === '×' ? 'Répétitions' : x.u === 's' ? 'Durée' : 'Minutes'}</div>${stepperHtml(s => `A.moveStep(${bi},${mi},${s})`, x.n, x.u === '×' ? 'répétitions' : x.u === 's' ? 'secondes' : 'min')}` : ''}
+    ${m.o && m.o !== m.t ? `<div class="mini">Avant : ${esc(m.o)}</div>` : ''}
+    <button class="q" style="color:var(--red)" onclick="A.moveRm(${bi},${mi})">Retirer ce mouvement</button>
+    <button class="main static" onclick="A.back()">OK</button>`;
+}
 function vEditI(bi) {
   const b = D.session.blocks[bi]; if (!b) { sub = { day: D.date }; return vDay(D.date); }
   const cur = (b.title.split('·')[1] || '').trim();
   return `${backBar(esc(b.title))}
     ${b.kind === 'warmup' ? `<div class="k">Machine</div><div class="chips">${MACHINES.map(m => `<button class="chip ${cur === m ? 'on' : ''}" onclick="A.machine(${bi},${js(m)})">${m}</button>`).join('')}</div>` : ''}
     <div class="k">Durée</div>${stepperHtml(s => `A.stepI(${bi},${s})`, b.minutes, 'min')}
-    ${b.detail ? `<div class="box">${esc(b.detail)}</div>` : ''}
-    <button class="q" style="color:var(--red)" onclick="A.removeC(${bi})">Supprimer</button>
+    ${b.kind === 'mobility' || b.kind === 'cooldown' ? mobList(bi) : b.detail ? `<div class="box">${esc(b.detail)}</div>` : ''}
+    <button class="q" style="color:var(--red)" onclick="A.removeC(${bi})">Supprimer le bloc</button>
     <button class="main static" onclick="A.back()">OK</button>`;
 }
 
@@ -745,6 +798,7 @@ function render() {
   let h;
   if (sub && sub.edit) h = vEdit(sub.edit.bi, sub.edit.ii);
   else if (sub && sub.editC != null) h = vEditC(sub.editC);
+  else if (sub && sub.editM) h = vEditM(sub.editM.bi, sub.editM.mi);
   else if (sub && sub.editI != null) h = vEditI(sub.editI);
   else if (sub && sub.circ != null) h = vCirc(sub.circ);
   else if (sub && sub.pick) h = vPick();
